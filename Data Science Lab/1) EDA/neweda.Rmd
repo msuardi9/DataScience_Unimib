@@ -1,0 +1,451 @@
+---
+title: "New eda"
+author: "Matteo Suardi"
+date: "2025-07-03"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+data <- read.csv("Indicator_Last_Region.csv")
+```
+
+```{r}
+colnames(data)
+```
+
+```{r}
+names_short <- c(
+  "edu", "empl", "unempl", "income", "homicide", "mortality", 
+  "life_exp", "pm2_5", "voter", "broadband", "internet_speed", 
+  "rooms_pp", "social_support", "life_satisfaction"
+)
+
+colnames(data)[1:3] <- colnames(data)[1:3]
+
+colnames(data)[4:(3 + length(names_short))] <- names_short
+```
+
+```{r}
+View(data)
+```
+
+Verificata la struttura del dataset tramite il comando `colnames(data)`, che restituisce i nomi originali delle colonne. Questi risultano essere lunghi, complessi e contenenti numerosi caratteri speciali, rendendo difficile l’interpretazione e la manipolazione delle variabili nelle fasi successive di analisi. Le variabili includono indicatori di benessere sociale, economico e ambientale, come il livello di istruzione, il tasso di occupazione, il reddito disponibile, la qualità dell’aria, il numero medio di stanze per persona e la soddisfazione di vita auto-valutata.
+
+Per facilitare il lavoro, si è proceduto a rinominare le colonne dalla quarta in poi con nomi sintetici e semanticamente chiari, utilizzando un vettore `names_short` contenente etichette come `"edu"` per l’istruzione, `"empl"` per il tasso di occupazione, `"income"` per il reddito, `"life_satisfaction"` per la soddisfazione di vita, e così via. Le prime tre colonne (`Country`, `Region`, `Code`) sono state mantenute invariate per garantire la tracciabilità geografica e regionale delle osservazioni.
+
+# panoramica
+
+```{r}
+glimpse(data)
+sapply(data, class)
+```
+
+```{r}
+data <- data %>%
+  group_by(Country) %>%
+  mutate(across(where(is.numeric), ~ ifelse(is.na(.), mean(., na.rm = TRUE), .)))
+```
+
+```{r}
+View(data)
+```
+
+Dopo la rinomina delle variabili, si è proceduto con una panoramica completa del dataset tramite i comandi `glimpse(data)` e `sapply(data, class)`. Il dataset risultante contiene 447 osservazioni e 17 variabili, di cui 14 rappresentano indicatori numerici di benessere, mentre le prime tre (`Country`, `Region`, `Code`) forniscono informazioni geografiche e strutturali.
+
+I tipi di variabile sono stati correttamente identificati: gli indicatori sono tutti in formato `numeric`, mentre le variabili identificative sono `character`. Questa struttura consente analisi quantitative, aggregazioni per Paese, visualizzazioni e trasformazioni numeriche coerenti.
+
+Successivamente, si è gestita la presenza di valori mancanti (NA) nelle variabili numeriche, utilizzando una strategia di imputazione per media nazionale. In particolare, per ciascuna variabile numerica e per ogni Paese (`group_by(Country)`), i valori mancanti sono stati sostituiti con la media delle regioni appartenenti allo stesso Paese. Questo approccio permette di preservare le differenze tra Paesi, evitando distorsioni derivanti da medie globali, e fornisce un compromesso affidabile tra accuratezza e conservazione del contesto geografico.
+
+# statistiche descrittive
+
+```{r}
+skim_without_charts(data %>% select(where(is.numeric)))
+```
+
+# distribuzioni
+
+```{r}
+data %>%
+  pivot_longer(cols = where(is.numeric)) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~name, scales = "free") +
+  theme_minimal() +
+  labs(title = "Distribuzioni degli indicatori")
+  facet_wrap(~name, scales = "free", ncol = 3)
+```
+
+```{r}
+df_focus <- data[, vars_focus]
+
+# Pivot + grafico
+df_focus %>%
+  pivot_longer(cols = everything()) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~name, labeller = as_labeller(pretty_names), scales = "free", ncol = 3) +
+  theme_minimal(base_size = 12) +
+  labs(title = "Distribuzioni degli indicatori selezionati", x = NULL, y = "Frequenza")
+```
+
+```{r}
+data %>%
+  pivot_longer(cols = where(is.numeric)) %>%
+  ggplot(aes(y = value)) +
+  geom_boxplot(fill = "orange", outlier.color = "red") +
+  facet_wrap(~name, scales = "free") +
+  theme_minimal() +
+  labs(title = "Outlier nelle variabili (boxplot)")
+```
+
+Alcuni indicatori, come l’occupazione (empl) e la soddisfazione di vita (life\_satisfaction), presentano distribuzioni relativamente concentrate e simmetriche. Altri, come il reddito (income), il tasso di disoccupazione (unempl), l’inquinamento da PM2.5 (pm2\_5) e il tasso di omicidi (homicide), mostrano una forte asimmetria positiva, con code lunghe verso destra che indicano la presenza di regioni con valori molto elevati rispetto alla mediana. Il reddito disponibile pro capite evidenzia infatti una concentrazione tra i 10.000 e i 30.000 USD, ma con alcune osservazioni superiori ai 60.000. Allo stesso modo, il tasso di omicidi è per la maggior parte inferiore a 5 ogni 100.000 abitanti, ma presenta outlier estremamente alti. I valori dell’inquinamento atmosferico (PM2.5) tendono a concentrarsi tra 5 e 20 μg/m³, ma con alcuni casi superiori ai 35, mentre la disoccupazione, generalmente sotto il 10%, presenta alcune regioni con oltre il 25%.
+
+La distribuzione dell’indicatore di soddisfazione di vita (life\_satisfaction) mostra un andamento quasi normale, ma leggermente asimmetrico a sinistra, con la maggioranza dei valori compresi tra 6 e 8. L’analisi dei boxplot conferma la presenza di outlier estremi per molte variabili: si notano regioni con valori anomali di income, unempl, pm2\_5 e homicide, spesso molto distanti dal resto della distribuzione. Tuttavia, altre variabili, come rooms\_pp, broadband, voter e social\_support, mostrano una distribuzione più compatta, anche se con qualche caso isolato.
+
+L’esame delle distribuzioni mostra che molti indicatori presentano una forma asimmetrica o multimodale. Ad esempio, *life\_satisfaction* assume una distribuzione approssimativamente normale ma leggermente asimmetrica a sinistra, mentre variabili come *income* e *unempl* mostrano una forte coda a destra, evidenziando la presenza di regioni molto ricche o con tassi di disoccupazione elevati rispetto alla media. Indicatori sanitari come *mortality* e *pm2\_5* (inquinamento) seguono una distribuzione simile, con picchi intorno a valori intermedi ma anche con code lunghe verso l’alto. L’indicatore *homicide* è marcatamente distorto a destra, con la quasi totalità delle osservazioni concentrate in prossimità dello zero e alcuni valori estremamente alti. Al contrario, *rooms\_pp*, *broadband*, *voter* e *social\_support* mostrano distribuzioni più compatte e meno influenzate da code estreme.
+
+I boxplot confermano e arricchiscono queste osservazioni: emergono outlier estremi soprattutto per *homicide*, *income*, *unempl*, *pm2\_5* e *mortality*. In particolare, alcune regioni presentano valori di *homicide* superiori a 75 per 100.000 abitanti, mentre il *reddito disponibile pro capite* supera i 60.000 USD in certi casi. La disoccupazione raggiunge punte del 30%, segnalando situazioni di forte crisi occupazionale. L’inquinamento atmosferico mostra picchi oltre 40 µg/m³ di PM2.5, e la mortalità in alcune regioni supera i 15 decessi per 1.000 abitanti. Anche *life\_expectancy* e *life\_satisfaction* includono outlier inferiori, con aspettativa di vita sotto i 70 anni o soddisfazione percepita sotto il valore 5. Infine, *social\_support*, generalmente stabile, rivela in alcuni casi valori molto bassi, segno di potenziale isolamento sociale in alcune aree.
+
+Nel complesso, questa prima fase dell’EDA restituisce un’immagine complessa ma coerente della realtà regionale osservata, in cui le differenze strutturali tra aree geografiche si riflettono chiaramente nelle distribuzioni degli indicatori. La presenza di outlier appare plausibile e informativa, e le variabili mostrano dinamiche interne diverse per forma, varianza e presenza di anomalie, tutte dimensioni essenziali per comprendere le determinanti della qualità della vita.
+
+# correlazioni
+
+```{r}
+data <- data %>%
+  mutate(across(.cols = -c(1:3), .fns = ~ as.numeric(as.character(.))))
+```
+
+```{r}
+data[, 4:ncol(data)] <- lapply(data[, 4:ncol(data)], function(x) as.numeric(as.character(x)))
+
+numeric_vars <- data[, 4:ncol(data)]
+```
+
+```{r}
+cor_matrix <- cor(numeric_vars, use = "pairwise.complete.obs")
+corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.7)
+```
+
+Positive:
+Regioni con alta istruzione (edu) hanno anche un alto tasso di occupazione (empl).
+Reddito alto = più soddisfazione.
+Rete sociale (social_support) percepita come forte predittore del benessere percepito.
+Regioni più ricche e istruite hanno infrastrutture digitali migliori.
+
+Negative:
+Disoccupazione è fortemente legata in negativo a quasi tutti gli indicatori di benessere.
+Dove c'è più inquinamento (pm2_5) la speranza di vita si riduce.
+Più alta la mortalità, più bassa la speranza di vita (life_exp).
+
+```{r}
+library(ppcor)
+library(corrplot)
+```
+
+```{r}
+numeric_vars_complete <- na.omit(numeric_vars)
+
+library(ppcor)
+partial_corr <- pcor(numeric_vars_complete, method = "pearson")
+
+partial_matrix <- partial_corr$estimate
+
+corrplot(partial_matrix, method = "color", type = "upper", tl.cex = 0.7,
+         title = "Correlazioni parziali", mar = c(0, 0, 2, 0))
+```
+
+```{r}
+par(mfrow = c(1, 2)) 
+corrplot(cor_matrix, method = "color", type = "upper", tl.cex = 0.6, title = "Raw", mar = c(0,0,2,0))
+corrplot(partial_matrix, method = "color", type = "upper", tl.cex = 0.6, title = "Partial", mar = c(0,0,2,0))
+par(mfrow = c(1, 1)) 
+```
+
+- Edu/empl e empl/income mostrano correlazioni semplici molto forti, ma si affievoliscono nelle correlazioni parziali (empl/income quasi 0). La relazione tra occupazione e istruzione/reddito è mediata da altre variabili.
+- Correlazione tra mortality e life_exp rimane negativa anche nella matrice parziale. Relazione diretta: anche controllando le altre variabili, la mortalità resta un forte predittore per la speranza di vita.
+- Life_satifstaction perde quasi tutte le correlazioni dirette (si attenuano o spariscono nella matrice parziale). La soddisfazione percepita dipende da una combinazione di variabili e non da una singola.
+- Le variabili sociali e tecnologiche (broadband, internet_speed, rooms_pp, voter) hanno correlazioni parziali deboli
+
+```{r}
+cor_matrix <- cor(numeric_vars, use = "pairwise.complete.obs")
+cor_matrix
+```
+
+L’analisi delle correlazioni tra le variabili del dataset offre importanti spunti interpretativi sia a livello descrittivo sia inferenziale. La matrice di correlazione classica rivela alcune associazioni molto forti e intuitive. Ad esempio, i livelli di istruzione (edu) sono fortemente e positivamente correlati con l’occupazione (empl, r = 0.73), con il reddito disponibile (income, r = 0.66) e con il numero medio di stanze per persona (rooms\_pp, r = 0.60), suggerendo che contesti più istruiti tendono a offrire migliori condizioni economiche e abitative. Un’altra relazione chiave riguarda la soddisfazione di vita (life\_satisfaction), che mostra una correlazione positiva significativa con diversi indicatori di benessere: educazione (r = 0.56), occupazione (r = 0.62), reddito (r = 0.53), qualità dell’abitazione (r = 0.57), qualità dell’aria (r = -0.60 con pm2\_5) e supporto sociale (r = 0.50), confermando il legame multifattoriale tra benessere soggettivo e condizioni socio-economiche e ambientali.
+
+Negativamente, la disoccupazione (unempl) mostra correlazioni inverse con quasi tutti gli indicatori di benessere (edu, empl, income, broadband, internet\_speed), confermando il suo ruolo sistemico come predittore di fragilità. Il tasso di inquinamento atmosferico (pm2\_5), oltre a essere legato negativamente a molte variabili socio-economiche, mostra anche una forte correlazione negativa con l’aspettativa di vita (r = -0.12) e la soddisfazione di vita. Infine, la mortalità (mortality) presenta una relazione inversa molto netta con la speranza di vita (r = -0.70), coerente con la definizione stessa delle due variabili.
+
+Tuttavia, passando alla matrice delle correlazioni parziali – che considera le relazioni condizionando su tutte le altre variabili – molte di queste associazioni si affievoliscono o scompaiono. Le forti correlazioni multiple osservate tra educazione, reddito e occupazione si riducono considerevolmente, suggerendo che queste variabili condividono varianza comune, probabilmente perché co-determinate da fattori strutturali. In particolare, il legame tra income ed empl sparisce quasi del tutto nelle correlazioni parziali, indicando che la relazione diretta tra reddito e occupazione è mediata da altre dimensioni come l’istruzione.
+
+La relazione tra mortalità e aspettativa di vita resta invece molto forte anche nella matrice parziale, a indicare che, al netto di tutte le altre variabili, la mortalità è ancora un predittore diretto e robusto della life expectancy. Al contrario, la soddisfazione di vita (life\_satisfaction) perde quasi tutte le sue correlazioni forti: sia il reddito, che l’istruzione e il supporto sociale, che mostravano correlazioni elevate nella matrice semplice, risultano ora molto attenuate. Questo implica che il benessere soggettivo è spiegato meglio da un insieme di condizioni sistemiche piuttosto che da singoli fattori isolati.
+
+```{r}
+# collinearità
+library(tidyverse)
+
+cor_df <- as.data.frame(as.table(cor_matrix)) %>%
+  filter(Var1 != Var2) %>%
+  mutate(abs_corr = abs(Freq)) %>%
+  arrange(desc(abs_corr))
+
+head(cor_df, 10)
+```
+
+```{r}
+library(GGally)
+
+df_scatter <- data[, c("income", "rooms_pp", "edu", "empl", "unempl")]
+
+ggpairs(df_scatter, title = "Scatterplot delle variabili collineari")
+```
+
+Il grafico evidenzia le relazioni di collinearità tra alcune delle variabili più centrali del dataset: `income`, `rooms_pp`, `edu`, `empl` e `unempl`. Le correlazioni tra queste variabili sono tutte statisticamente significative e in molti casi molto forti, come indicato anche dai coefficienti accompagnati da tre asterischi, che indicano una significatività a p < 0.001.
+
+Tra le correlazioni positive più marcate spiccano quelle tra `income` e `rooms_pp` (ρ = 0.748), `edu` e `empl` (ρ = 0.729), `income` e `edu` (ρ = 0.663), e `empl` e `rooms_pp` (ρ = 0.616). Queste relazioni suggeriscono un chiaro asse di benessere socioeconomico: le regioni con un’istruzione più diffusa tendono a essere anche più ricche, più occupate e ad avere condizioni abitative migliori (più stanze per persona). In altri termini, le dimensioni di capitale umano, capitale economico e capitale abitativo si muovono insieme, rafforzandosi reciprocamente.
+
+Le correlazioni negative sono altrettanto significative e rilevanti, in particolare quelle tra `unempl` (disoccupazione) e tutte le altre variabili del gruppo. La relazione tra `unempl` e `empl` è fortemente negativa (ρ = –0.712), come atteso data la complementarità strutturale dei due indicatori. Anche `unempl` è negativamente associata a `edu` (–0.450), `income` (–0.357) e `rooms_pp` (–0.356), confermando che le aree con maggiore disoccupazione tendono ad avere un capitale umano ed economico più debole.
+
+Dal punto di vista visuale, gli scatterplot mostrano chiaramente pattern lineari nelle relazioni positive, seppur con qualche eterogeneità nei valori estremi. In particolare, si osserva un effetto soglia per `income` e `rooms_pp`, dove al di sopra di certi valori la variabilità si appiattisce, suggerendo che oltre un certo livello di benessere, il numero di stanze o il reddito marginale non aumenta più in modo significativo.
+
+Nel complesso, la struttura di collinearità osservata conferma la presenza di blocchi coerenti di variabili legate al benessere socio-economico. Tali blocchi andranno gestiti con attenzione nelle fasi successive di modellazione, poiché la presenza di forte multicollinearità può influenzare negativamente la stabilità delle stime nei modelli multivariati.
+
+```{r}
+cor_target <- cor(numeric_vars, use = "pairwise.complete.obs")[, "life_satisfaction"]
+cor_target <- sort(cor_target, decreasing = TRUE)
+
+cor_target
+```
+
+```{r}
+high_corr_pairs <- cor_df %>%
+  filter(abs_corr > 0.7) %>%
+  arrange(desc(abs_corr))
+
+high_corr_pairs
+```
+
+```{r}
+library(ggcorrplot)
+
+ggcorrplot(cor_matrix, lab = TRUE, type = "lower", tl.cex = 10)
+```
+
+# scatterplot 
+
+```{r}
+GGally::ggpairs(numeric_vars[, 1:14]) 
+```
+
+# analisi per paese
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+
+# 1. Trova tutte le colonne numeriche
+vars_all <- names(data)[sapply(data, is.numeric)]
+
+# 2. Indicatori da invertire (esempi: aggiungine se necessario)
+# vars_to_invert <- c("unempl", "pm2_5", "mortality", "homicide")
+
+# 3. Calcola la media per Paese
+data_country_mean <- data %>%
+  group_by(Country) %>%
+  summarise(across(all_of(vars_all), mean, na.rm = TRUE))
+
+# 4. Inverti i valori "negativi"
+data_country_mean <- data_country_mean %>%
+  mutate(across(all_of(vars_to_invert), ~ -1 * .))
+
+# 5. Standardizza (z-score)
+data_z <- data_country_mean %>%
+  mutate(across(all_of(vars_all), scale))
+
+# 6. Istogrammi per tutti gli indicatori
+data_z %>%
+  pivot_longer(-Country) %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "steelblue", color = "white") +
+  facet_wrap(~name, scales = "free") +
+  theme_minimal(base_size = 11) +
+  labs(
+    title = "Distribuzione degli z-score per tutti gli indicatori",
+    x = "z-score (standardizzato)", y = "Frequenza"
+  )
+```
+
+Il grafico mostra la distribuzione degli z-score per ciascun indicatore, calcolati sulle medie nazionali. Gli z-score standardizzano ogni indicatore rispetto alla sua media e deviazione standard, permettendo un confronto diretto tra variabili con scale molto diverse. La lettura congiunta dei pannelli evidenzia due aspetti principali: la forma della distribuzione e la simmetria attorno allo zero (la media della variabile).
+
+Alcuni indicatori mostrano una distribuzione tendenzialmente normale ma asimmetrica, come `life_satisfaction` e `life_exp`, che hanno code sinistre più pronunciate, suggerendo che alcune regioni si trovano significativamente al di sotto della media globale. Altri, come `unempl`, `mortality` e `pm2_5`, presentano distribuzioni più distorte e allungate a destra (una volta invertiti), con concentrazioni attorno a valori positivi, segnalando che molte nazioni hanno performance mediocri o peggiori della media.
+
+Gli indicatori `broadband` e `social_support`mostrano distribuzioni molto concentrate, con gran parte delle regioni attorno a uno z-score positivo, segno che molte aree raggiungono buoni livelli in queste dimensioni. Al contrario, `homicide` mostra una forte asimmetria e una coda pesante a sinistra, causata dalla presenza di pochi paesi con valori estremamente negativi (cioè estremamente virtuosi nel tasso di omicidi una volta invertiti), e la maggior parte con z-score attorno allo zero.
+
+L’indicatore `internet_speed` appare con una distribuzione molto piatta e quasi uniforme, segno di grande eterogeneità nei valori medi tra paesi. 
+
+Nel complesso, queste distribuzioni forniscono una fotografia sintetica delle performance nazionali per ciascun indicatore e permettono di individuare rapidamente le variabili con maggiore disparità tra paesi. 
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(scales)
+library(forcats)
+
+# 1. Trova tutte le colonne numeriche
+vars_all <- names(data)[sapply(data, is.numeric)]
+
+# 2. Specifica gli indicatori "negativi" da invertire
+vars_to_invert <- c("unempl", "pm2_5", "mortality", "homicide")  # aggiungi altri se serve
+
+# 3. Calcola media per Paese
+data_country_mean_all <- data %>%
+  group_by(Country) %>%
+  summarise(across(all_of(vars_all), mean, na.rm = TRUE))
+
+# 4. Inverti i negativi (es. più basso è meglio)
+data_country_mean_all <- data_country_mean_all %>%
+  mutate(across(all_of(vars_to_invert), ~ -1 * .))
+
+# 5. Standardizza le medie
+data_z_all <- data_country_mean_all %>%
+  mutate(across(all_of(vars_all), scale))
+
+# 6. Grafico: top 10 Paesi per ciascun indicatore
+data_z_all %>%
+  pivot_longer(-Country) %>%
+  group_by(name) %>%
+  slice_max(order_by = value, n = 10) %>%
+  ggplot(aes(x = fct_reorder(Country, value, .desc = TRUE), y = value, fill = Country)) +  
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~name, scales = "free_y") +
+  coord_flip() +
+  scale_y_continuous(
+    breaks = pretty_breaks(n = 5),
+    labels = number_format(accuracy = 0.1)
+  ) +
+  theme_minimal(base_size = 11) +
+  labs(
+    title = "Top 10 Paesi per ciascun indicatore (z-score, negativi invertiti)",
+    y = "z-score (alto = migliore)", x = NULL
+  )
+```
+
+Il grafico rappresenta i primi 10 Paesi per ciascun indicatore, sulla base dei rispettivi z-score calcolati dopo la standardizzazione delle medie nazionali e l’inversione dei valori per le variabili “negative” (unemployment, pm2.5, mortality, homicide), in modo che in ogni caso un valore più alto corrisponda a una performance migliore.
+
+La visualizzazione permette di cogliere rapidamente quali Paesi eccellano nei diversi domini socioeconomici, sanitari, ambientali e infrastrutturali. La Finlandia, ad esempio, figura tra i primi 10 in un numero notevole di indicatori (educazione, qualità dell’aria, soddisfazione di vita, sicurezza), suggerendo una performance sistemicamente solida. Anche la Svizzera si distingue in molteplici dimensioni, inclusi reddito, aspettativa di vita, infrastrutture digitali e coesione sociale.
+
+Gli Stati Uniti emergono per il reddito pro capite e il numero di stanze per persona, ma sono assenti da indicatori ambientali e di salute, segnalando potenziali squilibri tra benessere economico e condizioni sanitarie/ambientali. Paesi scandinavi come Svezia, Norvegia e Danimarca si confermano tra i più performanti in termini di occupazione, soddisfazione di vita, sicurezza e supporto sociale. Il Giappone è tra i primi in aspettativa di vita e bassa criminalità, mentre la Corea e la Lituania eccellono in connettività e istruzione.
+
+Indicatori come l’inquinamento da PM2.5 e la mortalità evidenziano una leadership chiara da parte di paesi anglofoni (Canada, Australia, Nuova Zelanda) e dell’Europa settentrionale, rafforzando l’idea che la qualità ambientale sia strettamente legata a un sistema di welfare consolidato. Anche indicatori legati all'inclusione civica, come la partecipazione elettorale (voter), mostrano un nucleo di paesi europei e dell’Oceania che si distingue per alto coinvolgimento democratico.
+
+In sintesi, la rappresentazione a barre evidenzia con chiarezza i Paesi “virtuosi” per ciascun indicatore e suggerisce modelli geografici ricorrenti, con una netta predominanza di paesi nordici, anglosassoni e mitteleuropei tra i best performer. L’analisi facilita inoltre un confronto diretto multidimensionale tra Paesi, utile per riflessioni comparative e per eventuale costruzione di indici compositi di benessere.
+
+```{r}
+# 1. Indicatori selezionati
+vars_focus_5 <- c("edu", "unempl", "pm2_5", "life_satisfaction", "mortality")
+vars_to_invert <- c("unempl", "pm2_5", "mortality")
+
+# 2. Calcola media per Paese
+data_country_mean <- data %>%
+  group_by(Country) %>%
+  summarise(across(all_of(vars_focus_5), mean, na.rm = TRUE))
+
+# 3. Inverti i negativi
+data_country_mean <- data_country_mean %>%
+  mutate(across(all_of(vars_to_invert), ~ -1 * .))
+
+# 4. Standardizza le medie
+data_z <- data_country_mean %>%
+  mutate(across(all_of(vars_focus_5), scale))
+
+library(scales)
+library(forcats)  # serve per fct_reorder
+
+data_z %>%
+  pivot_longer(-Country) %>%
+  group_by(name) %>%
+  slice_max(order_by = value, n = 10) %>%
+  ggplot(aes(x = fct_reorder(Country, value, .desc = TRUE), y = value, fill = Country)) +  
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~name, scales = "free_y") +
+  coord_flip() +
+  scale_y_continuous(
+    breaks = pretty_breaks(n = 5),
+    labels = number_format(accuracy = 0.1)
+  ) +
+  theme_minimal(base_size = 11) +
+  labs(
+    title = "Top 10 Paesi per ciascun indicatore selezionato (z-score, negativi invertiti)",
+    y = "z-score (alto = migliore)", x = NULL
+  )
+```
+
+Il grafico mostra i primi 10 Paesi per ciascuno dei cinque indicatori selezionati: livello di istruzione (edu), soddisfazione di vita (life\_satisfaction), tasso di mortalità (mortality), inquinamento atmosferico da PM2.5 (pm2\_5) e disoccupazione (unempl). 
+
+Per quanto riguarda l’istruzione, si distinguono Paesi dell’Europa orientale e settentrionale come Finlandia, Repubblica Ceca, Corea e Canada. Questo indica una diffusione capillare dell’istruzione secondaria e superiore in queste regioni. Sul fronte della soddisfazione di vita, dominano i Paesi del Nord Europa, tra cui Danimarca, Finlandia, Islanda, Norvegia e Svezia, noti per il loro solido sistema di welfare e l’elevata coesione sociale. Anche il Lussemburgo e la Nuova Zelanda si distinguono, a conferma di uno stile di vita qualitativamente elevato.
+
+L’indicatore di mortalità premia Paesi con sistemi sanitari efficaci e condizioni socio-sanitarie favorevoli: Costa Rica, Cile, Islanda, Svizzera e Giappone occupano le prime posizioni. Si tratta di nazioni con alta aspettativa di vita e bassa incidenza di patologie mortali evitabili. I Paesi migliori per la qualità dell’aria, come rilevato dall’indicatore PM2.5, appartengono in larga parte all’emisfero settentrionale e anglosassone (Finlandia, Islanda, Norvegia, Canada, Australia), suggerendo politiche ambientali efficaci e un basso livello di industrializzazione intensiva in alcune aree.
+
+Infine, l’indicatore di disoccupazione, anch’esso invertito, evidenzia la performance di Paesi con un mercato del lavoro inclusivo ed efficiente, come Norvegia, Giappone, Repubblica Ceca, Corea e Germania. Alcuni di questi, come la Nuova Zelanda e i Paesi Bassi, appaiono in più indicatori, suggerendo una qualità della vita elevata anche sotto il profilo occupazionale.
+
+Complessivamente, questa visualizzazione mette in evidenza sia la multidimensionalità del concetto di benessere che la ricorrenza di alcuni Paesi – in particolare quelli nordici ed europei centrali – tra i best performer. La combinazione di dimensioni sociali, ambientali, economiche e soggettive rende questa analisi utile per identificare i modelli di successo e confrontare strategie di policy tra Paesi.
+
+```{r}
+ggplot(data, aes(x = income, y = life_satisfaction, color = Country)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "Relazione tra reddito e soddisfazione di vita",
+       x = "Reddito disponibile pro capite",
+       y = "Soddisfazione di vita (auto-valutata)")
+```
+
+Il grafico mostra la relazione tra il reddito disponibile pro capite e la soddisfazione di vita auto-valutata, distinguendo ogni osservazione per Paese. La nuvola di punti rivela una correlazione positiva moderata: al crescere del reddito, tende ad aumentare anche la soddisfazione dichiarata. La retta di regressione evidenzia questa tendenza, suggerendo che, in media, livelli di reddito più elevati sono associati a una maggiore percezione di benessere soggettivo.
+
+Tuttavia, la dispersione intorno alla retta è ampia, indicando che il reddito non è l’unico predittore della soddisfazione di vita. Alcuni Paesi, come la Finlandia, la Danimarca o la Svizzera, mostrano livelli molto alti di soddisfazione anche con redditi medi o medio-alti, mentre altri con redditi molto elevati (es. Stati Uniti) presentano una maggiore variabilità nei livelli di soddisfazione. Questo suggerisce l’influenza di fattori culturali, sociali e istituzionali nel modellare il benessere percepito oltre al solo reddito economico.
+
+Paesi latinoamericani come Costa Rica o Colombia si distinguono per una soddisfazione relativamente alta nonostante un reddito pro capite contenuto, indicando che la qualità della vita può derivare anche da aspetti non strettamente economici (coesione sociale, clima, valori culturali). Al contrario, economie ad alto reddito ma con maggiore disuguaglianza o precarietà (es. Stati Uniti) mostrano maggiore dispersione e casi di soddisfazione più bassa.
+
+In sintesi, il grafico conferma una relazione positiva tra reddito e benessere soggettivo, ma suggerisce anche che la soddisfazione di vita è un fenomeno complesso e multifattoriale, che non può essere spiegato esclusivamente da variabili economiche.
+
+```{r}
+ggplot(data, aes(x = edu, y = life_satisfaction, color = Country)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "Relazione tra istruzione e soddisfazione di vita",
+       x = "Reddito disponibile pro capite",
+       y = "Soddisfazione di vita (auto-valutata)")
+```
+
+Il grafico mostra la relazione tra il livello di istruzione (percentuale di popolazione con almeno l’istruzione secondaria) e la soddisfazione di vita auto-valutata nei diversi Paesi. La retta di regressione, positiva e inclinata, suggerisce che esiste una tendenza generale: al crescere del livello di istruzione, aumenta anche la soddisfazione di vita media.
+
+La dispersione dei punti è tuttavia significativa. Alcuni Paesi con livelli simili di istruzione presentano livelli di soddisfazione molto differenti. Questo conferma che l’istruzione, pur essendo un importante predittore del benessere percepito, non è un fattore esclusivo. In particolare, Paesi come la Finlandia, la Danimarca o la Svizzera mostrano livelli di soddisfazione molto elevati, coerenti con l’alta istruzione. Al contrario, in alcuni contesti con istruzione alta (es. Corea, Giappone), la soddisfazione di vita è meno marcata, suggerendo l’influenza di fattori culturali, stress lavorativo o modelli sociali.
+
+Si osserva anche che Paesi dell’America Latina, con livelli educativi inferiori, possono talvolta riportare livelli di soddisfazione relativamente alti, ribadendo come la percezione di benessere sia legata anche ad aspetti relazionali, valoriali e ambientali.
+
+In sintesi, l’istruzione contribuisce in modo rilevante alla soddisfazione di vita, ma il suo effetto è modulato da altri determinanti: reddito, salute, rete sociale e qualità delle istituzioni pubbliche. La relazione positiva rilevata dal modello lineare indica una tendenza media, ma la forte variabilità dei dati evidenzia che il benessere soggettivo è il risultato di un insieme complesso di fattori.
+
+```{r}
+ggplot(data, aes(x = mortality, y = life_satisfaction, color = Country)) +
+  geom_point(size = 2, alpha = 0.7) +
+  geom_smooth(method = "lm", se = FALSE, color = "black", linetype = "dashed") +
+  theme_minimal() +
+  labs(title = "Relazione tra mortalità e soddisfazione di vita",
+       x = "Mortalità",
+       y = "Soddisfazione di vita (auto-valutata)")
+```
+
+Il grafico evidenzia una relazione leggermente negativa tra il tasso di mortalità e la soddisfazione di vita nei diversi Paesi, rappresentata dalla linea tratteggiata di regressione discendente. Sebbene l’inclinazione non sia particolarmente marcata, suggerisce che a un aumento della mortalità media corrisponde, in generale, una lieve diminuzione della soddisfazione di vita auto-valutata.
+
+Tuttavia, i dati mostrano un’ampia variabilità. Alcuni Paesi, pur con un tasso di mortalità relativamente alto (sopra 10 decessi per 1.000 persone), registrano livelli di soddisfazione di vita medi o addirittura elevati. Questo è il caso di alcune realtà dell’Est Europa e dell’America Latina, dove la percezione del benessere potrebbe essere influenzata più da fattori culturali, relazionali o spirituali che da indicatori oggettivi di salute. Al contrario, alcuni Paesi con bassa mortalità mostrano soddisfazione media, suggerendo che la salute, pur importante, non determina da sola il benessere soggettivo.
+
+Il grafico suggerisce anche un pattern non lineare: la soddisfazione di vita resta relativamente stabile per livelli intermedi di mortalità, mentre tende a calare solo oltre una certa soglia. In questo senso, l’effetto della mortalità potrebbe agire come "campanello d’allarme" solo quando supera un livello critico, associandosi a un peggioramento delle condizioni sanitarie o sociali percepite.
+
+In sintesi, la mortalità si conferma un indicatore rilevante nella comprensione del benessere soggettivo, ma il suo impatto è contenuto e mediato da altri fattori più direttamente percepiti dalla popolazione, come il supporto sociale, la qualità della vita quotidiana e l’accesso a servizi pubblici efficaci.

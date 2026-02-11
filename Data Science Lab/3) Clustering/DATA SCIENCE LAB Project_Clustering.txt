@@ -1,0 +1,105 @@
+DATA SCIENCE LAB - Project
+
+QUESTION 4 - Clustering
+Quali configurazioni di benessere portano a soddisfazioni di vita simili? Possiamo identificare profili multipli di buona vita?
+	Obiettivo: scoprire se esistono percorsi alternativi per raggiungere livelli simili di life satisfaction (es. una regione può avere alta soddisfazione grazie a reddito + lavoro, un’altra grazie ad ambiente + comunità)
+	Approccio: clustering regioni, overlay della soddisfazione di vita (confronto media di life satisfaction per ogni cluster e identificare cluster diversi nei determinanti ma simili nel livello di soddisfazione), profilazione interpretativa (labeling dei cluster + collegamento con possibili politiche regionali)
+
+-----------------------------------------------
+CODICE PYTHON: Clustering_KMeans+PCA
+
+Obiettivi specifici:
+- Scoprire se esistono percorsi alternativi per raggiungere l’elevata soddisfazione soggettiva
+- Confrontare la Life Satisfaction media nei cluster
+- Etichettare i cluster attraverso una profilazione interpretativa
+- Collegare i risultati a possibili implicazioni politiche regionali
+
+Approccio metodologico:
+- Clustering con KMeans basato su 11 dimensioni del benessere
+- Overlay della Life Satisfaction per ogni cluster
+- Visualizzazione in spazio ridotto con PCA (2D)
+- Interpretazione semantica e confronto tra profili
+
+----
+
+INTERPRETAZIONE COMPLETA DEI 4 CLUSTER
+
+Cluster 0 – “Sicurezza Alta, Inclusione Debole”
+	Punti di forza: Sicurezza molto alta (9.6)
+	Punti deboli: Housing (2.8), Civic engagement e Community mediobassi (sotto la media)
+	Life Satisfaction media: 4.72
+	Profilo: contesto sicuro, ma con coesione e inclusione sociale deboli 
+
+Cluster 1 – “Benessere Materiale e Accesso, ma Salute fragile”
+	Punti di forza: Income (8.6), Housing (8.5), Accessibilità (8.0)
+	Punti deboli: Health (4.7)
+	Life Satisfaction media: 7.93
+	Profilo: alta qualità materiale e infrastrutturale (benessere strutturale ed economico), ma con possibili e potenziali carenze sanitarie
+
+Cluster 2 – “Deprivazione Multidimensionale”
+	Punti di forza: assenti (questo cluster non ha veri punti di forza sistemici, ma la sicurezza (safety) può essere letta come una risorsa residua che potrebbe essere valorizzata da politiche pubbliche locali. Tuttavia, in assenza di condizioni favorevoli in altre dimensioni, essa non riesce a sostenere un livello accettabile di soddisfazione di vita)
+	Punti deboli: quasi tutte le dimensioni, in particolare Income (0.4) e Housing (1.2)
+	Life Satisfaction media: 2.98
+	Profilo: regione a rischio strutturale e insoddisfazione marcata
+
+Cluster 3 – “Benessere Equilibrato e Sociale”
+	Punti di forza: Community (7.9), Civic engagement (7.4), Sicurezza (9.8), Health (7.7)
+	Punti deboli: Income e Housing più bassi rispetto al Cluster 1
+	Life Satisfaction media: 7.91
+	Profilo: benessere relazionale e sociale forte, non dipendente dalla ricchezza
+----
+
+CONFRONTO TRA PROFILI E LIFE SATISFACTION
+
+Cluster		LS Media	Stile di benessere dominante	Dimensioni trainanti
+0		4.72		Sicurezza isolata		Safety
+1		7.93		Materiale e Infrastrutturale	Income, Housing, Access
+2		2.98		Deprivazione sistemica		Nessuna
+3		7.91		Sociale/Relazionale		Community, Safety, Health
+
+Insights chiave:
+- Cluster 0 → segnali di resilienza parziale, ma vulnerabilità relazionale
+- Cluster 1 e 3 → stesso livello di soddisfazione, ma profili completamente opposti → conferma dell'esistenza di percorsi alternativi al benessere soggettivo
+- Cluster 2 → insoddisfazione sistemica, non compensabile da una singola variabile (conferma del fallimento sistemico: nessuna dimensione compensa le altre)
+
+----
+
+RISULTATO VISIVO – PCA
+
+Metodo:
+PCA con 2 componenti principali su dati standardizzati → per esplorare visivamente le relazioni strutturali tra i cluster
+
+Interpretazione del grafico:
+- Cluster 0 (blu): posizione intermedia, con distribuzione più diffusa
+- Cluster 1 (arancione) e 3 (rosso): posizionati distanti tra loro nello spazio delle dimensioni, ma con simile Life Satisfaction
+- Cluster 2 (verde): più isolato e bassa varianza (forte discontinuità strutturale)
+
+-> Questo rafforza l’idea che il benessere soggettivo può derivare da equilibri diversi tra le dimensioni.
+
+Implicazione visiva:
+Le regioni con simile soddisfazione non sono necessariamente vicine nello spazio strutturale; dunque la soddisfazione soggettiva non dipende da una configurazione unica, ma può emergere da diverse sinergie di dimensioni.
+
+----
+
+INTERPRETAZIONE ANALITICA e CONCLUSIONE
+L’analisi condotta attraverso clustering e PCA ha permesso di esplorare in modo approfondito la configurazione del benessere nelle regioni OCSE, dimostrando con evidenza empirica che non esiste un unico percorso verso l’elevata soddisfazione di vita.
+
+Abbiamo individuato almeno due profili profondamente diversi, uno fondato sul benessere materiale e infrastrutturale (Cluster 1) e l’altro centrato sul benessere sociale e relazionale (Cluster 3), che raggiungono risultati soggettivi equivalenti, dunque molto simili in termini di soddisfazione percepita. 
+Questo implica che il Life Satisfaction non dipende da una dimensione unica, ma può essere sostenuto da diversi equilibri sistemici, ovvero percorsi multipli verso il benessere.
+
+Parallelamente, le regioni in condizioni di deprivazione sistemica mostrano livelli drammaticamente inferiori di LS, e nessuna singola variabile è sufficiente a compensare le carenze.
+Infatti, l’individuazione di cluster con forte deprivazione multidimensionale (Cluster 2) e di regioni con profilo squilibrato ma parzialmente protetto (Cluster 0) consente di identificare i margini entro cui le politiche pubbliche possono agire. 
+Dove tutte le dimensioni sono carenti, l’insoddisfazione è sistemica e non recuperabile attraverso un singolo driver. 
+Dove invece esiste almeno una dimensione forte (es. sicurezza), è possibile costruire strategie di resilienza parziale, ma senza una coesione sufficiente per elevare il livello di soddisfazione.
+
+Dal punto di vista metodologico, il clustering ha permesso di svelare strutture latenti nei dati di benessere.
+L’uso di KMeans si è rivelato adeguato per svelare strutture latenti e raggruppamenti coerenti e ricorrere alla PCA ha offerto una visualizzazione interpretabile delle discontinuità e delle vicinanze strutturali tra le regioni. 
+Inoltre, l’overlay della Life Satisfaction media per cluster ha fornito evidenza quantitativa di equifinalità del benessere soggettivo.
+Le evidenze ottenute costituiscono una base robusta per eventuali analisi ulteriori (es. politiche comparative, mappe geografiche, studio longitudinale su trend di soddisfazione).
+
+
+Implicazioni politiche:
+I risultati di questa analisi suggeriscono chiaramente che le politiche pubbliche orientate al benessere non possono essere concepite secondo un modello uniforme e universalistico. L’idea di un’unica “ricetta” valida per tutte le regioni si rivela infatti inefficace, poiché le traiettorie che portano alla soddisfazione di vita possono variare sensibilmente da un contesto territoriale all’altro.
+In particolare, emerge la necessità di progettare strategie regionali mirate e differenziate, capaci di riconoscere e valorizzare i punti di forza specifici di ciascun territorio. Le regioni che raggiungono elevati livelli di soddisfazione soggettiva possono farlo sia attraverso il rafforzamento delle dimensioni materiali – come reddito, condizioni abitative e accesso ai servizi – sia attraverso la coesione sociale, la partecipazione civica, la sicurezza percepita e la qualità del tessuto relazionale.
+Pertanto, le politiche pubbliche dovrebbero abbandonare una logica esclusivamente compensativa, fondata sul miglioramento di singoli indicatori, per adottare invece un approccio sistemico, capace di attivare sinergie tra le varie dimensioni del benessere. In altri termini, la soddisfazione di vita appare come un risultato emergente, che nasce da configurazioni complesse di fattori interdipendenti, e non da una semplice sommatoria di punteggi elevati.
+Infine, il riconoscimento della pluralità di percorsi verso il benessere implica che le istituzioni regionali e nazionali debbano rafforzare le proprie capacità analitiche, promuovendo una governance più sensibile alle specificità locali. Ciò significa, in ultima analisi, adottare una visione territorialmente consapevole, socialmente inclusiva e strutturalmente integrata delle politiche per il benessere.

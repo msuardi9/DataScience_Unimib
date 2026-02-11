@@ -1,0 +1,391 @@
+---
+title: "DSLAB"
+output:
+  pdf_document: default
+  html_document: default
+date: "2025-07-01"
+---
+
+```{r}
+
+library(readxl)
+
+
+percorso_file_principale <- "D:/Dropbox/Desktop/Università/Magistrale/dataset1DSLAB.xlsx"
+
+dati_score_topic <- read_excel(percorso_file_principale, sheet = "Score_Last", skip = 5)
+
+dati_score_topic <- dati_score_topic[-c(1, 449:496), ]
+
+head(dati_score_topic)
+```
+
+```{r}
+require(skimr)
+skim_without_charts(dati_score_topic)
+```
+
+```{r}
+str(dati_score_topic)
+```
+
+```{r}
+dati_score_topic$Education <- as.numeric(dati_score_topic$Education)
+dati_score_topic$Jobs <- as.numeric(dati_score_topic$Jobs)
+dati_score_topic$Income <- as.numeric(dati_score_topic$Income)
+dati_score_topic$Safety <- as.numeric(dati_score_topic$Safety)
+dati_score_topic$Health <- as.numeric(dati_score_topic$Health)
+dati_score_topic$Environment <- as.numeric(dati_score_topic$Environment)
+dati_score_topic$`Civic engagement` <- as.numeric(dati_score_topic$`Civic engagement`)
+dati_score_topic$`Accessiblity to services` <- as.numeric(dati_score_topic$`Accessiblity to services`)
+dati_score_topic$Housing <- as.numeric(dati_score_topic$Housing)
+dati_score_topic$Community <- as.numeric(dati_score_topic$Community)
+dati_score_topic$`Life satisfaction` <- as.numeric(dati_score_topic$`Life satisfaction`)
+str(dati_score_topic)
+```
+
+```{r}
+require(skimr)
+skim_without_charts(dati_score_topic)
+```
+
+The means and medians for all variables are observed to be very similar. This suggests that the distributions are largely symmetrical, with the central tendency being well-represented by both measures.
+
+The standard deviations across all variables are relatively low. This indicates a limited spread or dispersion of data points around their respective means, implying that observations within each variable are generally clustered closely together.
+
+While missing values are present in the dataset, the completeness of observations is at least 90%. This level of data completeness is generally acceptable, though the impact of the missing data on specific analyses should be considered.
+
+Specifically, two variables (Income and Safety) appear to exhibit asymmetry in their distributions. Further investigation, possibly through skewness statistics or visual aids like histograms and box plots, would be beneficial to quantify the direction and degree of this asymmetry 
+
+IMPUTAZIONE NA
+
+```{r}
+library(tidyverse)
+library(dplyr)
+
+# 2. Impostazione per l'imputazione
+# Identifica le colonne numeriche su cui applicare l'imputazione
+# Escludi eventuali colonne ID o categoriche che non dovrebbero essere imputate
+numeric_cols <- dati_score_topic %>%
+  select(where(is.numeric)) %>%
+  colnames()
+
+# --- Passaggio 1: Imputazione della media per gruppo (Paese) ---
+# Se un gruppo ha tutti NA per una variabile, la media del gruppo risulterà NA.
+df_imputed_step1 <- dati_score_topic %>%
+  group_by(Country) %>% # Raggruppa il dataframe per 'Country'
+  mutate(across(all_of(numeric_cols), ~ {
+    # Calcola la media del gruppo. Se tutti i valori nel gruppo sono NA, la media sarà NA.
+    group_mean <- mean(., na.rm = TRUE)
+    # Sostituisci NA con la media del gruppo. Se group_mean è NA, lascerà NA.
+    replace_na(., group_mean)
+  })) %>%
+  ungroup() # Rimuovi il raggruppamento
+
+print("\nDataset dopo l'imputazione con la media del Paese:")
+print(df_imputed_step1)
+print("\nNA per colonna dopo Step 1 (media del Paese):")
+print(colSums(is.na(df_imputed_step1)))
+
+
+# --- Passaggio 2: Imputazione della mediana globale per i rimanenti NA ---
+# Questi NA sono quelli che non sono stati imputati al Passaggio 1 perché interi gruppi erano NA.
+df_final_imputed <- df_imputed_step1 %>%
+  mutate(across(all_of(numeric_cols), ~ {
+    # Calcola la mediana globale per la colonna.
+    # Questo è necessario perché 'group_mean' potrebbe essere ancora NA
+    # se l'intero gruppo aveva solo NA per quella variabile.
+    global_median <- median(df_imputed_step1[[cur_column()]], na.rm = TRUE)
+    # Sostituisci i rimanenti NA (quelli dai gruppi con tutti NA) con la mediana globale
+    replace_na(., global_median)
+  }))
+
+print("\nDataset Finale dopo Imputazione (Media del Paese, poi Mediana Globale):")
+print(df_final_imputed)
+print("\nNA per colonna dopo l'imputazione finale:")
+print(colSums(is.na(df_final_imputed)))
+
+```
+
+Check if there are missing values:
+
+```{r}
+last_score_region <- df_final_imputed 
+skim_without_charts(last_score_region)
+```
+
+Now we observe the variables distributions:
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(purrr)
+library(patchwork)
+
+df <- last_score_region
+
+# --- 2. Selects only numeric variables ---
+
+numeric_vars <- df %>%
+  select(where(is.numeric)) %>% 
+  colnames() 
+
+print(paste("\nNumerical variables identified for histograms:", length(numeric_vars)))
+print(numeric_vars)
+
+histogram_list <- map(numeric_vars, ~ {
+  ggplot(df, aes(x = .data[[.x]])) + 
+    geom_histogram(binwidth = (max(df[[.x]], na.rm = TRUE) - min(df[[.x]], na.rm = TRUE)) / 20,  
+                                      fill = "skyblue", color = "black") +
+    labs(title = paste("Distribution of", .x), x = .x, y = "Frequence") +
+    theme_minimal() + # Tema pulito
+    theme(plot.title = element_text(size = 10, face = "bold"), 
+          axis.title = element_text(size = 8),
+          axis.text = element_text(size = 7))
+})
+
+# --- 4. Histograms ---
+
+num_plots <- length(histogram_list)
+cols_per_row <- 3 
+rows_needed <- ceiling(num_plots / cols_per_row)
+
+
+combined_plot <- wrap_plots(histogram_list, ncol = cols_per_row, nrow = rows_needed) +
+  plot_annotation(
+    title = "Distributions of Numerical Variables.",
+    theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+  )
+
+# Show the combined plot 
+print(combined_plot)
+```
+
+In general, most of the distributions of the numerical indicators show a tendency to be left-skewed. This means that the majority of observations are concentrated towards the higher values of the range, with a longer "tail" towards the lower values. This is a positive sign for well-being indicators, as it suggests that most regions are performing relatively well in these areas.
+Many of the distributions show a shape resembling a unimodal distribution, with a peak (mode) towards the upper end of the scale.
+SAFETY: This is the most distinctive distribution. It is strongly left-skewed (negatively skewed) with a very pronounced and dominant peak in the last one or two bins (towards the value 10). This indicates that the vast majority of regions have extremely high safety scores, close to the maximum.
+INCOME: Although it maintains some left-skewness, the income distribution shows a less sharp peak compared to Safety and a wider spread across the entire range. There are several significant bars across the entire scale, indicating greater variability in income scores among regions compared to other indicators like Safety.
+CIVIC ENGAGEMENT: Unlike most others, this distribution appears to be more bimodal or have a more pronounced central plateau. There are two noticeable peaks, one towards the lower values (between 2 and 3) and another towards the middle-to-high end of the scale (between 6 and 8). This could suggest the existence of two distinct groups of regions: those with low civic engagement and those with moderate-to-high engagement, with fewer regions in between.
+
+
+
+```{r}
+
+boxplot_list <- map(numeric_vars, ~ {
+  ggplot(df, aes(y = .data[[.x]])) + 
+    geom_boxplot(fill = "lightblue", color = "darkblue", outlier.colour = "red") +
+    labs(title = paste("Boxplot of", .x), y = .x) + 
+    theme_minimal() + 
+    theme(plot.title = element_text(size = 10, face = "bold"), 
+          axis.title.y = element_text(size = 8), 
+          axis.text.y = element_text(size = 7),
+          axis.text.x = element_blank(), 
+          axis.ticks.x = element_blank()) 
+})
+
+# --- 4. boxplot  ---
+num_plots <- length(boxplot_list)
+cols_per_row <- 4 
+rows_needed <- ceiling(num_plots / cols_per_row)
+
+combined_boxplot_plot <- wrap_plots(boxplot_list, ncol = cols_per_row, nrow = rows_needed) +
+  plot_annotation(
+    title = "Boxplot Distributions of Numerical Variables.",
+    theme = theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+  )
+
+# Show the combined plot 
+print(combined_boxplot_plot)
+```
+From a general perspective, most variables (e.g., Education, Jobs, Health, Environment, Accessibility to services, Housing, Community, Life satisfaction) show medians clustered in the upper half of the 0-10 scale, typically between 5.0 and 8.0, with relatively few prominent outliers. This suggests that for a majority of these indicators, the dataset's observations generally lean towards higher scores. However, a closer look at "Income" and "Safety" reveals distinct distributional characteristics.
+
+SAFETY: This boxplot strongly confirms the severe left-skewness observed in the histogram for Safety. The vast majority of regions have very high safety scores, with little variability among them. The outliers indicate that there are a number of regions with unusually low safety scores, which deviate significantly from the norm.
+
+INCOME: This indicates that while the majority of regions (middle 50%) have relatively low-to-moderate income scores, there are a substantial number of regions that are performing exceptionally well in terms of income, acting as outliers. This distribution shows a strong positive skewness (skewed to the right) or a very long tail of high-income regions, which aligns with the "Income" histogram having a wider spread but with values clustered on the lower side for the bulk of the data, and some high values on the far right.
+
+The others are normal.
+
+
+```{r}
+cov_var <- round(cov(last_score_region[,4:14], use = "complete.obs"), 3)
+cor_matrix <- round(cor(last_score_region[, 4:14], use = "complete.obs"), 3)
+cor_matrix
+```
+All the correlation are positive and most of them are positively moderate correlated. The hightest correlation is 0.765 between Housing and Income. The 5 variables that are most correlated with our target variable (Life satisfaction) are: Community, Environment, Housing, Jobs and Income.
+
+```{r}
+library(corrplot)
+corrplot(cor_matrix,
+         method = "color", 
+         type = "upper",   
+         order = "hclust",  
+         tl.col = "black",  
+         tl.srt = 45,       
+         addCoef.col = "black", 
+         col = COL2("RdBu", 200) )
+```
+
+```{r}
+pairs(last_score_region[,4:9],
+ panel = panel.smooth,
+lower.panel = NULL,
+main = "Scatterplot matrix")
+```
+
+```{r}
+pairs(last_score_region[,10:14],
+ panel = panel.smooth,
+lower.panel = NULL,
+main = "Scatterplot matrix")
+```
+There is a consistent positive correlation among all variables. 
+
+## DATASET LAST SCORE COUNTRY
+
+```{r}
+numeric_cols_for_aggregation <- last_score_region %>%
+  select(where(is.numeric)) %>% # Seleziona tutte le colonne numeriche
+  colnames()
+
+last_score_country <- last_score_region %>%
+  group_by(Country) %>% # Raggruppa il DataFrame per la colonna 'Country'
+  summarise(
+    # Calcola la media per ogni colonna numerica selezionata
+    # .across() è utile per applicare la stessa funzione a più colonne
+    # .names = "{.col}_mean" è un'opzione per rinominare le nuove colonne (es. Education_mean)
+    # na.rm = TRUE è cruciale per ignorare i valori NA nel calcolo della media
+    across(all_of(numeric_cols_for_aggregation), mean, na.rm = TRUE, .names = "{.col}_mean")
+  ) %>%
+  ungroup() # Rimuovi il raggruppamento per evitare problemi in operazioni future
+
+
+print("\nDataset Raggruppato per Paese (Medie):")
+head(last_score_country)
+
+```
+```{r}
+library(ggplot2)
+library(dplyr)
+#install.packages("sf") # Per dati spaziali (geometrie)
+#install.packages("rnaturalearth") # Per ottenere dati geografici del mondo
+#install.packages("rnaturalearthdata") # Dati geografici più dettagliati per rnaturalearth
+```
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(sf) # Simple Features for R
+library(rnaturalearth) # Per ottenere i dati geografici dei paesi
+library(rnaturalearthdata) # Dati aggiuntivi per rnaturalearth
+
+# --- 2. Ottieni i dati geografici del mondo ---
+# Usiamo ne_countries per ottenere le geometrie dei paesi
+world <- ne_countries(scale = "medium", returnclass = "sf")
+
+# Visualizza alcune righe dei dati geografici per capire le colonne disponibili
+# In particolare, cerca la colonna che contiene i nomi dei paesi (spesso 'name' o 'sovereignt')
+print("\nPrime righe del dataset geografico 'world':")
+print(head(world %>% select(name, sovereignt, geometry)))
+
+
+# --- 3. Unisci il tuo dataset con i dati geografici ---
+# L'unione (join) è la parte più critica. Devi assicurarti che la colonna 'Country'
+# nel tuo dataset corrisponda a una colonna di nomi di paesi nel dataset 'world'.
+# Spesso 'name' o 'sovereignt' in 'world' funziona bene.
+
+# Effettua un left_join. Manterremo tutte le geometrie dei paesi,
+# e aggiungeremo i tuoi dati di Life_satisfaction dove i paesi corrispondono.
+# I paesi nel dataset geografico che non sono nel tuo dataset avranno NA per Life_satisfaction.
+world_data <- left_join(world, last_score_country, by = c("name" = "Country"))
+
+# Puoi verificare quanti paesi hanno trovato corrispondenza:
+print(paste("\nNumero di paesi nel dataset geografico dopo l'unione:", nrow(world_data)))
+print(paste("Numero di paesi con dati di 'Life_satisfaction' mappati:", sum(!is.na(world_data$`Life satisfaction_mean`))))
+print(paste("Paesi nel tuo dataset non trovati nel GeoJSON (potrebbero essere presenti ma con nomi diversi):",
+            paste(last_score_country$Country[!last_score_country$Country %in% world_data$name], collapse = ", ")))
+
+
+# --- 4. Crea la mappa coropletica con ggplot2 ---
+
+ggplot(data = world_data) +
+  geom_sf(aes(fill = `Life satisfaction_mean`), color = "black", size = 0.1) + # color/size per i bordi dei paesi
+  scale_fill_viridis_c(option = "plasma", direction = -1, # Scala di colori continua (viridis, plasma, etc.)
+                       na.value = "grey80", # Colore per i paesi con dati mancanti
+                       limits = c(0, 10), # Imposta il range dei colori da 0 a 10
+                       name = "Life Satisfaction\nScore (0-10)") + # Etichetta della legenda
+  coord_sf(crs = "+proj=robin") + # Proiezione della mappa (Robinson è comune per mappe mondiali)
+  labs(
+    title = "Map of Life Satisfaction by Country",
+    subtitle = "Average data by country (0-10 scales)",
+    caption = "Source: last_score_country / Natural Earth"
+  ) +
+  theme_minimal() + # Tema pulito
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    legend.position = "right", # Posizione della legenda
+    legend.title = element_text(size = 10, face = "bold"),
+    legend.text = element_text(size = 9),
+    panel.grid.major = element_line(color = "transparent"), # Rimuove le griglie
+    panel.grid.minor = element_line(color = "transparent"),
+    axis.text = element_blank(), # Rimuove le etichette degli assi (lat/long)
+    axis.ticks = element_blank() # Rimuove i tick degli assi
+  )
+```
+
+The choropleth map visually represents "Life Satisfaction Scores" across various countries, using a color gradient from yellow (low satisfaction) to purple (high satisfaction). Countries for which data is not available appear in grey.
+
+Several European countries, particularly in Scandinavia (e.g., Denmark, Finland, Norway), show high levels of life satisfaction, indicated by darker purple shades. Australia and New Zeland also appear with high scores.
+
+Countries in regions like South America (e.g., Chile, parts of South America where data is present) and parts of Eastern Europe tend to display lower life satisfaction, represented by lighter orange/pink colors.
+
+The graph below illustrates the observations previously made:  
+
+```{r}
+# (Necessita dei pacchetti ggplot2, dplyr, sf, rnaturalearth, rnaturalearthdata come prima)
+
+# 1. Ottieni i dati geografici e calcola i centroidi per i punti delle bolle
+world_centroids <- ne_countries(scale = "medium", returnclass = "sf") %>%
+  st_centroid() # Calcola il centroide di ogni geometria del paese
+
+# 2. Unisci il tuo dataset con i centroidi
+world_data_centroids <- left_join(world_centroids, last_score_country, by = c("name" = "Country"))
+
+# 3. Ottieni le geometrie dei paesi (per lo sfondo della mappa)
+world_map_background <- ne_countries(scale = "medium", returnclass = "sf")
+
+# 4. Crea la mappa a bolle
+ggplot() +
+  geom_sf(data = world_map_background, fill = "lightgrey", color = "white", size = 0.1) + # Mappa di base grigia
+  geom_sf(data = world_data_centroids, aes(size = `Life satisfaction_mean`, color = `Life satisfaction_mean`), alpha = 0.7) + # Bolle
+  scale_size_continuous(range = c(1, 10), name = "Life Satisfaction") + # Range di dimensione delle bolle
+  scale_color_viridis_c(option = "plasma", direction = -1, name = "Life Satisfaction") + # Colore delle bolle
+  coord_sf(crs = "+proj=robin") +
+  labs(title = "Life Satisfaction: Bubble Map by Country",
+       subtitle = "Size and Color of Bubble represent the Score") +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(hjust = 0.5, face = "bold", size = 16),
+    plot.subtitle = element_text(hjust = 0.5, size = 12),
+    legend.position = "right",
+    axis.text = element_blank(),
+    axis.ticks = element_blank(),
+    panel.grid.major = element_line(color = "transparent"),
+    panel.grid.minor = element_line(color = "transparent")
+  )
+```
+
+
+```{r}
+library(dplyr)
+
+df_ordered_by_lifesat <- last_score_country %>%
+  arrange(`Life satisfaction_mean`)
+
+df_ordered_by_lifesat[1:3,]
+df_ordered_by_lifesat[36:38,]
+
+```
+
+An analysis of life satisfaction reveals that the three lowest-ranking countries are Turkey, Greece, and Colombia. Consistent with our expectations, the variables most highly correlated with life satisfaction (especially income) exhibit notably low values for these nations. In stark contrast, Iceland, Finland, and Denmark emerge as the top three countries in terms of life satisfaction. For these high-ranking countries, the values of the most correlated variables are very high.
+These findings suggest a potential link to differing political wellness across these countries.
