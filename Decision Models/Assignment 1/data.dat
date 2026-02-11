@@ -1,0 +1,35 @@
+# Definisco gli insiemi
+set CARGO := 1 2 3;
+set WAGON := 1 2 3 4;
+
+# Profitto (€/tonnellata) per ciascun tipo di carico
+param profit :=
+1 3500
+2 2500
+3 2000;
+
+# Superficie richiesta per tonnellata (unità di superficie) per ciascun tipo di carico
+param surface_req :=
+1 500
+2 300
+3 400;
+
+# Disponibilità massima (tonnellate) per ciascun tipo di carico
+param avail :=
+1 20
+2 10
+3 18;
+
+# Capacità di peso (tonnellate) per ciascun vagone
+param weightCap :=
+1 10
+2 8
+3 12
+4 6;
+
+# Capacità di superficie (unità di superficie) per ciascun vagone
+param surfaceCap :=
+1 5000
+2 4000
+3 8000
+4 2500;

@@ -1,0 +1,149 @@
+% Options for packages loaded elsewhere
+\PassOptionsToPackage{unicode}{hyperref}
+\PassOptionsToPackage{hyphens}{url}
+%
+\documentclass[
+]{article}
+\usepackage{amsmath,amssymb}
+\usepackage{iftex}
+\ifPDFTeX
+  \usepackage[T1]{fontenc}
+  \usepackage[utf8]{inputenc}
+  \usepackage{textcomp} % provide euro and other symbols
+\else % if luatex or xetex
+  \usepackage{unicode-math} % this also loads fontspec
+  \defaultfontfeatures{Scale=MatchLowercase}
+  \defaultfontfeatures[\rmfamily]{Ligatures=TeX,Scale=1}
+\fi
+\usepackage{lmodern}
+\ifPDFTeX\else
+  % xetex/luatex font selection
+\fi
+% Use upquote if available, for straight quotes in verbatim environments
+\IfFileExists{upquote.sty}{\usepackage{upquote}}{}
+\IfFileExists{microtype.sty}{% use microtype if available
+  \usepackage[]{microtype}
+  \UseMicrotypeSet[protrusion]{basicmath} % disable protrusion for tt fonts
+}{}
+\makeatletter
+\@ifundefined{KOMAClassName}{% if non-KOMA class
+  \IfFileExists{parskip.sty}{%
+    \usepackage{parskip}
+  }{% else
+    \setlength{\parindent}{0pt}
+    \setlength{\parskip}{6pt plus 2pt minus 1pt}}
+}{% if KOMA class
+  \KOMAoptions{parskip=half}}
+\makeatother
+\usepackage{xcolor}
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\makeatletter
+\def\maxwidth{\ifdim\Gin@nat@width>\linewidth\linewidth\else\Gin@nat@width\fi}
+\def\maxheight{\ifdim\Gin@nat@height>\textheight\textheight\else\Gin@nat@height\fi}
+\makeatother
+% Scale images if necessary, so that they will not overflow the page
+% margins by default, and it is still possible to overwrite the defaults
+% using explicit options in \includegraphics[width, height, ...]{}
+\setkeys{Gin}{width=\maxwidth,height=\maxheight,keepaspectratio}
+% Set default figure placement to htbp
+\makeatletter
+\def\fps@figure{htbp}
+\makeatother
+\setlength{\emergencystretch}{3em} % prevent overfull lines
+\providecommand{\tightlist}{%
+  \setlength{\itemsep}{0pt}\setlength{\parskip}{0pt}}
+\setcounter{secnumdepth}{-\maxdimen} % remove section numbering
+\ifLuaTeX
+  \usepackage{selnolig}  % disable illegal ligatures
+\fi
+\usepackage{bookmark}
+\IfFileExists{xurl.sty}{\usepackage{xurl}}{} % add URL line breaks if available
+\urlstyle{same}
+\hypersetup{
+  pdftitle={Decision models - First assignment},
+  pdfauthor={Matteo Suardi},
+  hidelinks,
+  pdfcreator={LaTeX via pandoc}}
+
+\title{Decision models - First assignment}
+\author{Matteo Suardi}
+\date{2025-04-09}
+
+\begin{document}
+\maketitle
+
+\section{Exercise 1}\label{exercise-1}
+
+\#\#Answer the following questions:
+
+\#\#\#\#1. Can an LP model have more than one optimal solution? Is it
+possible for an LP model to have exactly two optimal solutions? Why or
+why not?
+
+Yes, an LP problem can have more than one optimal solution. This could
+happen when the objective function is parallel to one of the problem
+constraints that defines on the edge (or face, in higher dimensions) of
+the feasible region. In this case, the entire segment of feasible points
+along that edge yields the same optimal value and might be an optimal
+solution. However, an LP problem can NOT have two exact optimal
+solutions. This is because the set of optimal solutions (feasible
+region) in linear programming is always convex. If two points \(x_1\)
+and \(x_2\) are both optimal, then every convex combination of these two
+points (that is, any point of the form
+\(\lambda x_1 + (1- \lambda)x_2\), where \(0 \le \lambda \le 1\)) is
+also optimal. Therefore, between any two optimal solutions, there are
+infinitely many other optimal solutions.
+
+\#\#\#\#2. Are the following objective functions for an LP model
+equivalent?
+
+\[\text{max} (2x_1 + 3x_2 −x_3) \\ \text{min}(−2x_1 −3x_2 +x_3)\]
+
+Yes, the two objective functions are equivalent, because maximizing a
+linear function is equivalent to minimizing its negative. If both
+objective functions are applied to the same set of constraints, they
+will lead to the same optimal values for the decision variables
+\(x_1,x_2,x_3\). The only difference will be the objective function
+value, which will have opposite signs. So yes, both formulations will
+produce identical optimal solutions, even though the objective values
+will be numerically opposite.
+
+\paragraph{Which of the following constraints are not linear or cannot
+be included as a constraint in a linear programming
+problem?}\label{which-of-the-following-constraints-are-not-linear-or-cannot-be-included-as-a-constraint-in-a-linear-programming-problem}
+
+The constraints that are not linear and therefore cannot be included in
+an LP problem are:
+
+\begin{itemize}
+\tightlist
+\item
+  \(2x_1 + \sqrt x_2 \ge 60\) because it contains a square root, which
+  is a non-linear function.
+\item
+  \(\frac{3x_1+2x_2x_1-3x_3}{x_1+x_2+x_3} \le 0.9\) because it contains
+  a product of variables and at least a variable in the denominator,
+  both of which make it non-linear.
+\item
+  \(3x_1^2+7x_2 \le 45\) because it contains a quadratic term \(x1^2\),
+  which is not linear.
+\end{itemize}
+
+Only the constraints \(2x_1+x_2-3x_3 \ge 50\) and
+\(4x_1- \frac{1}{2}x_2=75\).
+
+\section{Exercise 2}\label{exercise-2}
+
+A construction materials company is looking for a way to maximize profit
+for transportation of their goods. The company has a train available
+with 4 wagons. The weight and surface capacities of each wagon are shown
+in the following table:
+
+\begin{figure}
+\centering
+\includegraphics{table_ex2.png}
+\caption{Exercise 2 table}
+\end{figure}
+
+\end{document}
