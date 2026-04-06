@@ -1,0 +1,157 @@
+---
+title: "Lab 1 - Nonparametric methods in survival analysis"
+author: "Matteo Suardi"
+date: "2026-03-29"
+output: pdf_document
+---
+
+We will work on the dataset described during the lecture: 42 children affected by Acute Lymphoblastic Leukemia
+(ALL) in first complete remission (1 CR) randomized (pair matched) to treatment arms (placebo and 6-MP) for remission maintenance (Freirerch et al, 1963). 
+
+Lets load the data frei.txt into R and call the "survival" package.
+
+```{r}
+library(survival)
+frei <- read.table('Acute lymphoblastic data.txt', na.strings = ".", header = TRUE, row.names = NULL)
+names(frei)
+head(frei)
+```
+
+## Question 1
+Working on the pooled sample, estimate and plot the survival function by the Kaplan-Meier method with Greenwood confidence bands.
+
+```{r}
+fit <- survfit(Surv(time, status) ~ 1, data = frei)
+summary(fit)
+names(fit)
+
+par(mar = c(4, 4, 2, 2))
+plot(fit, xlab = 'time (weeks)', ylab = 'survival probability')
+title('Kaplan Meier estimate (pooled data)')
+
+library(prodlim)
+fit.pl <- prodlim(Hist(time, status) ~ 1, data = frei)
+plot(fit.pl)
+```
+
+## Question 2
+For each treatment, estimate and plot the survival function by the KM method.
+
+```{r}
+fit <- survfit(Surv(time, status) ~ treat, data = frei)
+summary(fit)
+
+plot(fit, col = c(1, 2))
+plot(c(0, fit[treat=1]$time), c(1, fit[treat=1]$surv), type = 's', ylim = c(0, 1),
+     xlim = c(0, 35), xlab = 'time', ylab = 'survival probability', col = 1)
+lines(c(0, fit[treat=2]$time), c(1, fit[treat=2]$surv), type = 's', col = 2)
+lines(c(0, fit[treat=1]$time), c(1, fit[treat=1]$lower), type = 's', lty = 2, col = 1)
+lines(c(0, fit[treat=1]$time), c(1, fit[treat=1]$upper), type = 's', lty = 2, col = 1)
+lines(c(0, fit[treat=2]$time), c(1, fit[treat=2]$lower), type = 's', lty = 2, col = 2)
+lines(c(0, fit[treat=2]$time), c(1, fit[treat=2]$upper), type = 's', lty = 2, col = 2)
+title('Kaplan Meier estimate according to treatment')
+
+library(prodlim)
+fit.pl <- prodlim(Hist(time, status) ~ treat, data = frei)
+plot(fit.pl)
+```
+
+## Question 3
+Contrast in a plot the number of censored subjects and those at risk in the two groups.
+
+```{r}
+# At risk
+plot(fit[treat=1]$time, fit[treat=1]$n.risk, xlab = 'time',
+     ylab = 'number at risk, number of censored',
+     type = 's', ylim = c(0, 22), xlim = c(0, 35))
+points(fit[treat=1]$time, fit[treat=1]$n.risk)
+
+lines(fit[treat=2]$time, fit[treat=2]$n.risk, type = 's', lwd = 2)
+points(fit[treat=2]$time, fit[treat=2]$n.risk, pch = 2)
+
+# Censored subjects (reverse estimation)
+fit.rev <- survfit(Surv(time, status == 0) ~ treat, data = frei)
+
+lines(fit.rev[treat=1]$time, fit.rev[treat=1]$n.event, type = 's')
+points(fit.rev[treat=1]$time, fit.rev[treat=1]$n.event)
+
+lines(fit.rev[treat=2]$time, fit.rev[treat=2]$n.event, type = 's', lwd = 2)
+points(fit.rev[treat=2]$time, fit.rev[treat=2]$n.event, pch = 2)
+```
+
+## Question 4
+Working on the pooled sample, estimate and plot the cumulative hazard function:
+  a. by the Nelson-Aalen estimate
+  b. by $-\log(S(t))$
+  
+```{r}
+fit.pool <- survfit(Surv(time, status) ~ 1, data = frei)
+
+# Nelson-Aalen
+na.haz <- cumsum(fit.pool$n.event / fit.pool$n.risk)
+cbind(fit.pool$time, na.haz)
+plot(fit.pool$time, na.haz, type = 's', xlab = 'time', ylab = 'cumulative hazard')
+
+# -log(S(t))
+cumhaz <- -log(fit.pool$surv)
+plot(fit.pool$time, cumhaz, type = 's', ylim = c(0, 2), xlab = 'time', ylab = 'cumulative hazard')
+
+plot(fit.pool$time, na.haz, type = 's', xlab = 'time (weeks)',
+     ylab = 'cumulative hazard', ylim = c(0, 2))
+points(fit.pool$time, na.haz)
+lines(fit.pool$time, cumhaz, type = 's', col = 2)
+points(fit.pool$time, cumhaz, pch = 20, col = 2)
+legend("bottomright",
+       legend = c("Nelson-Aalen estimate", "-log(S(t))"),
+       col = c(1, 2), lty = 1, pch = c(1, 20))
+```
+
+## Question 5
+Estimate and plot the cumulative hazard in the two treatment groups.
+
+```{r}
+na.haz1 <- cumsum(fit[treat=1]$n.event / fit[treat=1]$n.risk)
+na.haz2 <- cumsum(fit[treat=2]$n.event / fit[treat=2]$n.risk)
+plot(fit[treat=1]$time, na.haz1, xlab = 'time', ylab = 'cumulative hazard',
+     type = 's', xlim = c(0, 35))
+lines(fit[treat=2]$time, na.haz2, type = 's', lwd = 2)
+```
+
+## Question 6
+Provide a smoothed estimate of the hazard function of the two treatment groups.
+
+```{r}
+haz1 <- fit[treat=1]$n.event / fit[treat=1]$n.risk
+haz2 <- fit[treat=2]$n.event / fit[treat=2]$n.risk
+
+plot(fit[treat=1]$time, haz1, xlab = 'time', ylab = 'hazard',
+     xlim = c(0, 35), ylim = c(0, 1))
+lines(lowess(cbind(fit[treat=1]$time, haz1)), col = 2)
+points(fit[treat=2]$time, haz2, lwd = 2)
+lines(lowess(cbind(fit[treat=2]$time, haz2)), col = 2)
+```
+
+## Question 7
+Estimate the failure rate under the hypothesis of constant hazard and interpret in terms of events/person weeks.
+
+```{r}
+# Placebo (treat = 1)
+tot.time.at.risk <- sum(frei$time[frei$treat == 1])
+tot.events       <- sum(frei$status[frei$treat == 1])
+f.rate           <- tot.events / tot.time.at.risk
+cbind(tot.events, tot.time.at.risk, f.rate)
+
+# 6-MP (treat = 2)
+tot.time.at.risk <- sum(frei$time[frei$treat == 2])
+tot.events       <- sum(frei$status[frei$treat == 2])
+f.rate           <- tot.events / tot.time.at.risk
+cbind(tot.events, tot.time.at.risk, f.rate)
+```
+
+## Question 8
+Test the null hypothesis of absence of treatment effect (6-MP vs PL) using a nonparametric hypothesis test (log-rank test).
+
+```{r}
+survdiff(Surv(time, status) ~ treat, data = frei)
+```
+

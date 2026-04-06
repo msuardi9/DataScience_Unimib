@@ -1,0 +1,452 @@
+---
+title: "Lab 1 - Nonparametric Methods in Survival Analysis"
+author: "Matteo Suardi"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: false
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+# Introduction
+
+We will work on the dataset described during the lecture: **42 children affected by Acute Lymphoblastic Leukemia (ALL)** in first complete remission (1 CR) randomized (pair matched) to treatment arms (**placebo** and **6-MP**) for remission maintenance (Freireich et al., 1963).
+
+**Clinical context:** ALL is the most common childhood cancer. After achieving first complete remission through induction chemotherapy, the critical clinical question is: *does maintenance therapy with 6-Mercaptopurine (6-MP) prolong the remission compared to placebo?*
+
+**Key survival analysis concepts:**
+
+- **Time-to-event**: the time from randomization to relapse (in weeks).
+- **Event (failure)**: relapse of leukemia (`status = 1`).
+- **Censoring**: patient still in remission at the end of follow-up (`status = 0`). This means we know the patient survived *at least* that long, but we don't know the exact relapse time. This is called **right censoring**.
+
+## Load the data
+
+```{r}
+library(survival)
+frei <- read.table('Acute lymphoblastic data.txt', na.strings = ".", header = TRUE, row.names = NULL)
+names(frei)
+head(frei)
+```
+
+The dataset has 4 variables:
+
+- `upn`: unique patient number (ID).
+- `treat`: treatment arm (1 = **placebo**, 2 = **6-MP**).
+- `time`: time to relapse or censoring (in **weeks**).
+- `status`: event indicator (1 = **relapse**, 0 = **censored**).
+
+Each arm has 21 patients (42 total). Notice that in the **placebo** group all 21 patients relapsed (`status = 1` for all), while in the **6-MP** group many patients are censored (`status = 0`), meaning they were still in remission at the end of the study.
+
+---
+
+# Question 1: Kaplan-Meier Estimate (Pooled Sample)
+
+**Working on the pooled sample, estimate and plot the survival function by the Kaplan-Meier method with Greenwood confidence bands.**
+
+## Theory
+
+The **Kaplan-Meier (KM) estimator** is a nonparametric estimator of the survival function $S(t) = P(T > t)$. It is defined as:
+
+$$\hat{S}(t) = \prod_{t_i \leq t} \left(1 - \frac{d_i}{n_i}\right)$$
+
+where:
+
+- $t_i$ are the ordered distinct event times,
+- $d_i$ is the number of events (relapses) at time $t_i$,
+- $n_i$ is the number of subjects **at risk** just before time $t_i$ (i.e., still in the study and event-free).
+
+The KM estimator is a **step function** that drops at each event time and remains constant between events. Censored observations do **not** cause a drop in the curve, but they reduce the number at risk $n_i$.
+
+**Greenwood's formula** provides the variance of the KM estimator:
+
+$$\widehat{\text{Var}}[\hat{S}(t)] = \hat{S}(t)^2 \sum_{t_i \leq t} \frac{d_i}{n_i(n_i - d_i)}$$
+
+The **95% confidence interval** (plain/linear) is then:
+
+$$\hat{S}(t) \pm 1.96 \times \sqrt{\widehat{\text{Var}}[\hat{S}(t)]}$$
+
+This is the default `conf.type = "plain"` in R. Note that this "plain" CI can sometimes go below 0 or above 1, which is a known limitation of the linear confidence bands.
+
+```{r}
+fit <- survfit(Surv(time, status) ~ 1, data = frei)
+summary(fit)
+```
+
+**How to read this table:**
+
+- At $t = 1$ week, $n = 42$ patients are at risk; $d = 2$ relapse $\Rightarrow \hat{S}(1) = 1 - 2/42 = 0.952$.
+- At $t = 2$ weeks, $n = 40$ patients are at risk; $d = 2$ relapse $\Rightarrow \hat{S}(2) = 0.952 \times (1 - 2/40) = 0.905$.
+- The `std.err` column reports the **Greenwood standard error** divided by $\hat{S}(t)$ (i.e., $\text{SE}/\hat{S}(t)$). To get the actual standard error, multiply by $\hat{S}(t)$.
+- `lower 95% CI` and `upper 95% CI` are the Greenwood confidence bands.
+
+By $t = 23$ weeks, $\hat{S}(23) = 0.189$: only about 19% of the pooled sample is still in remission.
+
+```{r, fig.width=7, fig.height=5}
+par(mar = c(4, 4, 2, 2))
+plot(fit, xlab = 'time (weeks)', ylab = 'survival probability')
+title('Kaplan Meier estimate (pooled data)')
+```
+
+**Interpretation:** The KM curve starts at $\hat{S}(0) = 1$ and decreases over time. The dashed lines represent the **95% Greenwood confidence bands**. The small vertical tick marks (`+`) on the curve represent **censored observations**. In the pooled sample, we see a relatively steep decline — the median survival time is approximately where the curve crosses 0.5 (around 8–12 weeks).
+
+```{r, fig.width=7, fig.height=5}
+library(prodlim)
+fit.pl <- prodlim(Hist(time, status) ~ 1, data = frei)
+plot(fit.pl)
+```
+
+The `prodlim` plot adds a **number at risk table** below the curve, which is very useful in clinical publications. It shows how many patients are still being followed at each time point.
+
+---
+
+# Question 2: KM Estimate by Treatment Group
+
+**For each treatment, estimate and plot the survival function by the KM method.**
+
+
+
+```{r}
+fit <- survfit(Surv(time, status) ~ treat, data = frei)
+summary(fit)
+```
+
+**Clinical interpretation of the two tables:**
+
+**Placebo group (treat = 1):**
+
+- All 21 patients eventually relapse (no censoring).
+- By $t = 8$ weeks, survival drops to $\hat{S}(8) = 0.381$ — more than 60% of placebo patients have relapsed within 8 weeks.
+- The **median remission time** is approximately **8 weeks** (where $\hat{S}(t)$ crosses 0.5).
+- By $t = 23$ weeks, $\hat{S}(23) = 0$ — all placebo patients have relapsed.
+
+**6-MP group (treat = 2):**
+
+- Only 9 out of 21 patients relapse; 12 are **censored** (still in remission at end of follow-up).
+- $\hat{S}(6) = 0.857$ — at 6 weeks, 85.7% of 6-MP patients are still in remission.
+- $\hat{S}(23) = 0.448$ — at 23 weeks, almost half are still in remission!
+- The **median remission time** is **not reached** (the curve never definitively crosses 0.5 with certainty), indicating a much longer remission duration.
+
+```{r, fig.width=7, fig.height=5}
+plot(fit, col = c(1, 2))
+```
+
+```{r, fig.width=7, fig.height=5}
+plot(c(0, fit[treat=1]$time), c(1, fit[treat=1]$surv), type = 's', ylim = c(0, 1),
+     xlim = c(0, 35), xlab = 'time', ylab = 'survival probability', col = 1)
+lines(c(0, fit[treat=2]$time), c(1, fit[treat=2]$surv), type = 's', col = 2)
+lines(c(0, fit[treat=1]$time), c(1, fit[treat=1]$lower), type = 's', lty = 2, col = 1)
+lines(c(0, fit[treat=1]$time), c(1, fit[treat=1]$upper), type = 's', lty = 2, col = 1)
+lines(c(0, fit[treat=2]$time), c(1, fit[treat=2]$lower), type = 's', lty = 2, col = 2)
+lines(c(0, fit[treat=2]$time), c(1, fit[treat=2]$upper), type = 's', lty = 2, col = 2)
+title('Kaplan Meier estimate according to treatment')
+```
+
+**Clinical interpretation:** The separation between the two curves is striking:
+
+- The **black curve** (placebo) drops rapidly and reaches 0 by week 23.
+- The **red curve** (6-MP) declines much more slowly and remains above 0.4 at week 23.
+- The **confidence bands** (dashed lines) overlap somewhat in the early period but diverge substantially, suggesting a real treatment effect.
+- This visual difference supports the hypothesis that **6-MP significantly prolongs remission** compared to placebo.
+
+```{r, fig.width=7, fig.height=5}
+library(prodlim)
+fit.pl <- prodlim(Hist(time, status) ~ treat, data = frei)
+plot(fit.pl)
+```
+
+---
+
+# Question 3: Number at Risk and Censored Subjects
+
+**Contrast in a plot the number of censored subjects and those at risk in the two groups.**
+
+## Theory
+
+Understanding the **number at risk** $n_i$ and the **censoring pattern** is crucial:
+
+- $n_i$ tells us how many patients are still under observation at each time point. A rapidly decreasing $n_i$ means we have less information (wider confidence bands).
+- The number of **censored subjects** tells us how many patients left the study without experiencing the event.
+
+In the placebo group, the number at risk decreases only because of events (relapses). In the 6-MP group, it decreases both because of events *and* censoring — many patients were still in remission when the study ended.
+
+```{r, fig.width=7, fig.height=5}
+# At risk
+plot(fit[treat=1]$time, fit[treat=1]$n.risk, xlab = 'time',
+     ylab = 'number at risk, number of censored',
+     type = 's', ylim = c(0, 22), xlim = c(0, 35))
+points(fit[treat=1]$time, fit[treat=1]$n.risk)
+
+lines(fit[treat=2]$time, fit[treat=2]$n.risk, type = 's', lwd = 2)
+points(fit[treat=2]$time, fit[treat=2]$n.risk, pch = 2)
+
+# Censored subjects (reverse estimation)
+fit.rev <- survfit(Surv(time, status == 0) ~ treat, data = frei)
+
+lines(fit.rev[treat=1]$time, fit.rev[treat=1]$n.event, type = 's')
+points(fit.rev[treat=1]$time, fit.rev[treat=1]$n.event)
+
+lines(fit.rev[treat=2]$time, fit.rev[treat=2]$n.event, type = 's', lwd = 2)
+points(fit.rev[treat=2]$time, fit.rev[treat=2]$n.event, pch = 2)
+```
+
+**Interpretation:**
+
+- **Descending curves** (starting at ~21) = number at risk over time.
+- **Ascending curves** (starting at ~0) = cumulative number of censored subjects.
+- **Placebo (thin lines, circles):** the number at risk drops quickly (all patients relapse), and there are essentially **no censored observations** — the ascending curve stays at 0.
+- **6-MP (thick lines, triangles):** the number at risk drops more slowly, and the **censoring curve rises substantially** — 12 out of 21 patients are censored.
+
+**Clinical takeaway:** The heavy censoring in the 6-MP group is actually *good news* — it means many patients were still in remission when the study ended. This is consistent with the treatment being effective.
+
+The **reverse Kaplan-Meier** trick (`status == 0`) swaps events and censoring, so that censored observations become the "events" we count.
+
+---
+
+# Question 4: Cumulative Hazard Function (Pooled)
+
+**Working on the pooled sample, estimate and plot the cumulative hazard function.**
+
+## Theory
+
+The **hazard function** $h(t)$ represents the instantaneous rate of failure at time $t$, given survival up to that point:
+
+$$h(t) = \lim_{\Delta t \to 0} \frac{P(t \leq T < t + \Delta t \mid T \geq t)}{\Delta t}$$
+
+The **cumulative hazard function** is:
+
+$$H(t) = \int_0^t h(u) \, du$$
+
+It is related to the survival function by:
+
+$$S(t) = \exp\{-H(t)\}$$
+
+There are two common nonparametric estimators of $H(t)$:
+
+### a) Nelson-Aalen estimator
+
+$$\hat{H}_{NA}(t) = \sum_{t_i \leq t} \frac{d_i}{n_i}$$
+
+This is a direct estimator of the cumulative hazard. It sums the ratio of events to the number at risk at each event time.
+
+### b) From the Kaplan-Meier estimator
+
+Using the relationship $S(t) = e^{-H(t)}$, we can derive:
+
+$$\hat{H}_{KM}(t) = -\log[\hat{S}_{KM}(t)]$$
+
+```{r}
+fit.pool <- survfit(Surv(time, status) ~ 1, data = frei)
+```
+
+### a) Nelson-Aalen
+
+```{r, fig.width=7, fig.height=5}
+na.haz <- cumsum(fit.pool$n.event / fit.pool$n.risk)
+cbind(fit.pool$time, na.haz)
+plot(fit.pool$time, na.haz, type = 's', xlab = 'time', ylab = 'cumulative hazard')
+```
+
+### b) $-\log(\hat{S}(t))$
+
+```{r, fig.width=7, fig.height=5}
+cumhaz <- -log(fit.pool$surv)
+plot(fit.pool$time, cumhaz, type = 's', ylim = c(0, 2), xlab = 'time', ylab = 'cumulative hazard')
+```
+
+### Contrast
+
+```{r, fig.width=7, fig.height=5}
+plot(fit.pool$time, na.haz, type = 's', xlab = 'time (weeks)',
+     ylab = 'cumulative hazard', ylim = c(0, 2))
+points(fit.pool$time, na.haz)
+lines(fit.pool$time, cumhaz, type = 's', col = 2)
+points(fit.pool$time, cumhaz, pch = 20, col = 2)
+legend("bottomright",
+       legend = c("Nelson-Aalen estimate", "-log(S(t))"),
+       col = c(1, 2), lty = 1, pch = c(1, 20))
+```
+
+**Interpretation and comparison:**
+
+- Both estimators are **increasing step functions** — the cumulative hazard can only go up (hazard is always $\geq 0$).
+- The **Nelson-Aalen** estimate (black) is consistently **slightly lower** than $-\log(\hat{S}_{KM})$ (red).
+- This is because the Nelson-Aalen uses an **additive** approximation: $\hat{H}_{NA} = \sum d_i/n_i$, while $-\log(\hat{S}_{KM})$ uses a **multiplicative** (product-limit) approach.
+- Mathematically, $-\log(1 - x) > x$ for $x \in (0, 1)$, which explains why $-\log(\hat{S}_{KM}) \geq \hat{H}_{NA}$.
+- The two estimates are **very close when events are sparse** (small $d_i/n_i$), and **diverge more when jumps are large** (many events relative to the risk set).
+- In practice, for large samples the difference is negligible.
+
+---
+
+# Question 5: Cumulative Hazard by Treatment Group
+
+**Estimate and plot the cumulative hazard in the two treatment groups.**
+
+```{r, fig.width=7, fig.height=5}
+na.haz1 <- cumsum(fit[treat=1]$n.event / fit[treat=1]$n.risk)
+na.haz2 <- cumsum(fit[treat=2]$n.event / fit[treat=2]$n.risk)
+
+plot(fit[treat=1]$time, na.haz1, xlab = 'time', ylab = 'cumulative hazard',
+     type = 's', xlim = c(0, 35))
+lines(fit[treat=2]$time, na.haz2, type = 's', lwd = 2)
+```
+
+**Interpretation:**
+
+- The **placebo group** (thin line) accumulates hazard much faster — reaching $\hat{H}(23) \approx 3.0$ by week 23. This means a very high cumulative risk of relapse.
+- The **6-MP group** (thick line) accumulates hazard much more slowly — $\hat{H}(23) \approx 0.8$ by the end of follow-up.
+- The **ratio** of the two cumulative hazards gives a rough idea of the relative hazard: the placebo group has roughly 3–4 times the cumulative hazard of the 6-MP group.
+- A **constant gap** between the two cumulative hazard curves on a log scale would suggest **proportional hazards** — a key assumption of the Cox model (which will be covered later in the course).
+
+---
+
+# Question 6: Smoothed Hazard Function
+
+**Provide a smoothed estimate of the hazard function of the two treatment groups.**
+
+## Theory
+
+The **hazard function** at each event time can be estimated as:
+
+$$\hat{h}(t_i) = \frac{d_i}{n_i}$$
+
+However, this produces a very **noisy** (jagged) estimate because each point is based on few observations. To better visualize the **trend** of the hazard over time, we apply a **LOWESS** (LOcally WEighted Scatterplot Smoothing) smoother.
+
+LOWESS fits local weighted regressions at each point, giving a smooth curve that captures the overall trend while filtering out random variation.
+
+```{r, fig.width=7, fig.height=5}
+haz1 <- fit[treat=1]$n.event / fit[treat=1]$n.risk
+haz2 <- fit[treat=2]$n.event / fit[treat=2]$n.risk
+
+plot(fit[treat=1]$time, haz1, xlab = 'time', ylab = 'hazard',
+     xlim = c(0, 35), ylim = c(0, 1))
+lines(lowess(cbind(fit[treat=1]$time, haz1)), col = 2)
+points(fit[treat=2]$time, haz2, lwd = 2)
+lines(lowess(cbind(fit[treat=2]$time, haz2)), col = 2)
+```
+
+**Interpretation:**
+
+- The **individual hazard estimates** (circles) are very scattered — this is expected with small sample sizes.
+- The **LOWESS smooth** (red lines) reveals the underlying trend.
+- **Placebo group:** the smoothed hazard shows a **roughly increasing trend**, suggesting that the risk of relapse increases over time (or is at least non-constant). The large point at $t = 23$ ($\hat{h} = 1.0$) means the last remaining patient relapsed — this is an artifact of the last observation.
+- **6-MP group:** the smoothed hazard is **lower and relatively flat**, suggesting a more constant (and lower) risk of relapse over time.
+- **Clinical note:** the shape of the hazard function informs model choice. If the hazard is roughly constant, an **exponential model** may be appropriate (see Question 7). If it changes over time, more flexible models (Weibull, Cox) may be needed.
+
+---
+
+# Question 7: Failure Rate under Constant Hazard
+
+**Estimate the failure rate under the hypothesis of constant hazard and interpret in terms of events/person weeks.**
+
+## Theory
+
+Under the assumption of **constant hazard** (exponential model), the survival function is:
+
+$$S(t) = e^{-\lambda t}$$
+
+where $\lambda$ is the **failure rate** (constant hazard). The maximum likelihood estimator of $\lambda$ is:
+
+$$\hat{\lambda} = \frac{\text{total number of events}}{\text{total person-time at risk}} = \frac{D}{\sum_{i=1}^{n} t_i}$$
+
+Note: $\sum t_i$ is the sum of all observed times (both events and censored), which represents the **total person-time** contributed by the study.
+
+```{r}
+# Placebo (treat = 1)
+tot.time.at.risk <- sum(frei$time[frei$treat == 1])
+tot.events       <- sum(frei$status[frei$treat == 1])
+f.rate           <- tot.events / tot.time.at.risk
+cbind(tot.events, tot.time.at.risk, f.rate)
+```
+
+**Placebo:** $\hat{\lambda}_1 = 21 / 182 = 0.1154$ events per person-week.
+
+This means that, on average, there are approximately **0.115 relapses per person per week** — or equivalently, about **11.5 relapses per 100 person-weeks** of follow-up.
+
+```{r}
+# 6-MP (treat = 2)
+tot.time.at.risk <- sum(frei$time[frei$treat == 2])
+tot.events       <- sum(frei$status[frei$treat == 2])
+f.rate           <- tot.events / tot.time.at.risk
+cbind(tot.events, tot.time.at.risk, f.rate)
+```
+
+**6-MP:** $\hat{\lambda}_2 = 9 / 359 = 0.0251$ events per person-week.
+
+This means approximately **2.5 relapses per 100 person-weeks**.
+
+**Clinical interpretation:**
+
+- The failure rate in the **placebo group is about 4.6 times higher** than in the 6-MP group: $\hat{\lambda}_1 / \hat{\lambda}_2 = 0.1154 / 0.0251 \approx 4.6$.
+- Under the exponential assumption, the **mean survival time** is $E[T] = 1/\lambda$:
+    - Placebo: $1/0.1154 \approx 8.7$ weeks
+    - 6-MP: $1/0.0251 \approx 39.9$ weeks
+- The **6-MP group contributes much more person-time** (359 vs 182 person-weeks) despite having the same number of patients, because patients survive longer.
+- **Caveat:** the constant hazard assumption may not hold (see the smoothed hazard plots in Question 6). If the hazard is not constant, the exponential model is misspecified and these estimates should be interpreted with caution.
+
+---
+
+# Question 8: Log-Rank Test
+
+**Test the null hypothesis of absence of treatment effect (6-MP vs PL) using a nonparametric hypothesis test.**
+
+## Theory
+
+The **log-rank test** (also called Mantel-Cox test) is the most widely used nonparametric test for comparing survival distributions between groups. It tests:
+
+$$H_0: S_1(t) = S_2(t) \quad \text{for all } t$$
+
+vs.
+
+$$H_1: S_1(t) \neq S_2(t) \quad \text{for some } t$$
+
+At each distinct event time $t_j$, we construct a $2 \times 2$ table:
+
+|              | Events | No event | At risk |
+|:-------------|:------:|:--------:|:-------:|
+| Group 1      | $d_{1j}$ | $n_{1j} - d_{1j}$ | $n_{1j}$ |
+| Group 2      | $d_{2j}$ | $n_{2j} - d_{2j}$ | $n_{2j}$ |
+| **Total**    | $d_j$    | $n_j - d_j$       | $n_j$    |
+
+Under $H_0$, the expected number of events in group 1 is:
+
+$$E_{1j} = n_{1j} \cdot \frac{d_j}{n_j}$$
+
+The test statistic sums over all event times:
+
+$$\chi^2 = \frac{\left[\sum_j (d_{1j} - E_{1j})\right]^2}{\sum_j \text{Var}(d_{1j})} \sim \chi^2_1$$
+
+where $\text{Var}(d_{1j}) = \frac{n_{1j} \cdot n_{2j} \cdot d_j \cdot (n_j - d_j)}{n_j^2 (n_j - 1)}$.
+
+```{r}
+survdiff(Surv(time, status) ~ treat, data = frei)
+```
+
+**How to read the output:**
+
+- **N:** 21 patients per group.
+- **Observed:** actual number of events — 21 relapses in placebo, 9 in 6-MP.
+- **Expected:** expected number of events **under $H_0$** — 10.7 in placebo, 19.3 in 6-MP. Under the null hypothesis of no treatment effect, we would expect the events to be distributed proportionally to the time at risk.
+- **$(O - E)^2 / E$:** standardized squared deviation for each group.
+- **$(O - E)^2 / V$:** the actual test statistic (based on the variance $V$).
+- **$\chi^2 = 16.8$, df = 1, $p = 4 \times 10^{-5}$.**
+
+**Clinical conclusion:**
+
+The p-value is **highly significant** ($p = 0.00004$), providing very strong evidence to **reject $H_0$**. There is a statistically significant difference in remission duration between the two treatment groups.
+
+Specifically:
+
+- The placebo group experienced **almost twice as many events as expected** under $H_0$ (21 observed vs 10.7 expected).
+- The 6-MP group experienced **less than half the events expected** (9 observed vs 19.3 expected).
+- This confirms that **6-MP significantly prolongs remission** in children with ALL.
+
+**Important notes on the log-rank test:**
+
+1. The log-rank test gives **equal weight to all time points**. The **Wilcoxon (Breslow) test** (`rho = 1` in `survdiff`) gives more weight to early time points.
+2. The log-rank test is most powerful when the **proportional hazards assumption** holds (i.e., the hazard ratio between groups is approximately constant over time).
+3. The log-rank test tells us *whether* there is a difference, but not *how large* the difference is — for that, we need measures like the **hazard ratio** from a Cox model.
