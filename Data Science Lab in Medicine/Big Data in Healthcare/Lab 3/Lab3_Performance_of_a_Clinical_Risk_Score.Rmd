@@ -1,0 +1,1077 @@
+---
+title: "Lab 3 - Assessment of the Performance of a Risk Predictor"
+author: "Matteo Suardi"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 1
+    number_sections: false
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+\newpage
+
+# Introduction
+
+We work on a dataset from a medical register containing data about $N = 805$ patients who received a **heart transplantation** in the period 01/01/2012 - 31/12/2017. The objective is to develop a **risk score** to predict death within 1 year after transplant and to assess its **predictive performance**.
+
+Time since transplant is recorded in years (`time.y`). The event indicator (`event`) is 1 for death and 0 for administrative censoring. The available prognostic factors are:
+
+- **gender**: patient sex
+- **age**: age at transplant (continuous)
+- **bmi.cat**: BMI category (`a<25`, `b25-30`, `c>=30`)
+- **status**: clinical status at transplant (`1` = critical, `2A` = severe, `2B` = stable)
+- **crea**: creatinine level at transplant
+- **azot**: azotemia level at transplant
+
+## Data loading
+```{r data-loading}
+htrap <- read.table("htrap.txt", na.strings = ".", header = TRUE, row.names = NULL)
+
+library(survival)
+library(pROC)
+library(riskRegression)
+library(dcurves)
+
+names(htrap)
+head(htrap)
+str(htrap)
+```
+
+\newpage
+
+# Question 1: Kaplan-Meier survival function and 1-year risk of death
+
+*Estimate the overall Kaplan-Meier survival function and compute the estimated risk of death within 1 year after transplant.*
+
+## Theoretical background
+
+In survival analysis, each individual holds a true lifetime $X$ and a censoring time $C$. Due to **right censoring**, we can only observe:
+
+$$T = \min(X, C)$$
+
+together with the event indicator:
+
+$$\delta = \begin{cases} 1 & \text{if } X \leq C \quad (\text{event observed}) \\ 0 & \text{if } X > C \quad (\text{censored}) \end{cases}$$
+
+A key assumption is that the **censoring process is independent** of the failure process, i.e. censoring does not select "special patients".
+
+The **survival function** $S(t) = P(X > t)$ represents the probability of surviving beyond time $t$. It is estimated nonparametrically by the **Kaplan-Meier (Product-Limit) estimator**.
+
+Let $t_{(1)} < t_{(2)} < \dots < t_{(J)}$ be the **distinct observed event times**. At each event time $t_{(j)}$, let:
+
+- $n_j$ = number of individuals **at risk** just before $t_{(j)}$
+- $d_j$ = number of **events** (deaths) at $t_{(j)}$
+
+The KM estimator is:
+
+$$\hat{S}_{KM}(t) = \prod_{j \mid t_{(j)} \leq t} \left(1 - \frac{d_j}{n_j}\right)$$
+
+where the ratio $d_j / n_j$ is a nonparametric estimate of the discrete hazard $\hat{\lambda}(t_{(j)})$ at each event time. The KM curve is a **decreasing step function** that changes only at observed event times, and $\hat{S}(0) = 1$ by convention. Censored subjects contribute to the risk set up until their censoring time and then silently exit.
+
+The variance of the KM estimator is given by the **Greenwood formula**:
+
+$$\hat{V}\!\left[\hat{S}_{KM}(t_{(j)})\right] = \hat{S}_{KM}^2(t_{(j)}) \sum_{k=1}^{j} \frac{d_k}{n_k(n_k - d_k)}$$
+
+The **cumulative incidence function** (risk of death by time $t$) is the complement of survival:
+
+$$\hat{F}_{KM}(t) = 1 - \hat{S}_{KM}(t)$$
+
+In our context, $\hat{F}_{KM}(1) = 1 - \hat{S}_{KM}(1)$ gives the estimated probability that a patient dies within the first year after heart transplantation.
+
+```{r question1}
+fit <- survfit(Surv(time.y, event) ~ 1, data = htrap)
+
+plot(fit,
+     xlab = "Years since transplant",
+     ylab = "Survival probability",
+     main = "Overall Kaplan-Meier survival curve (N = 805)")
+
+summary(fit, times = 1)
+
+risk_1y <- 1 - summary(fit, times = 1)$surv
+cat("Estimated 1-year risk of death:", round(risk_1y, 4), "\n")
+```
+
+The `summary(fit, times = 1)` output provides the Kaplan-Meier estimate of the survival probability at exactly 1 year after transplant, $\hat{S}_{KM}(1)$, which is **0.787** (or 78.7%). The output also reports its estimated standard error (using the Greenwood formula), equal to **0.0145**, and the 95% confidence interval, which ranges from **0.759** to **0.816**.
+
+The **estimated 1-year risk of death** is obtained as $\hat{F}_{KM}(1) = 1 - \hat{S}_{KM}(1)$ and, as explicitly shown in the output, corresponds exactly to **0.2126** (21.26%). This is an overall, unadjusted estimate of the probability that a heart transplant recipient (referring to the `htrap` dataset) dies within the first year. It represents the **marginal risk** in the entire cohort — where at the 1-year mark, **170 events** are observed out of **576 patients still at risk** — and will serve as the benchmark against which patient-specific predicted risks (derived from Cox models, see Question 5 onwards) will be compared.
+
+Note that this estimate is computed on the **full dataset** ($N = 805$, as confirmed by the survival curve title), which includes patients transplanted after 01/01/2017 whose potential follow-up is less than 1 year. Because some of these patients are censored before reaching the 1-year landmark, the Kaplan-Meier estimator must strictly rely on the **independent censoring assumption** to correctly estimate $S(1)$.
+
+\newpage
+
+# Question 2: Censoring function and number of subjects censored within 1 year
+
+*Estimate the overall censoring function and check the number of subjects censored within 1 year after transplant.*
+
+## Theoretical background
+
+Recall that each individual has a true lifetime $X$ and a censoring time $C$, and we observe $(T, \delta)$ where $T = \min(X, C)$. The standard Kaplan-Meier estimator targets the **survival function** of $X$, treating censoring as the nuisance mechanism. However, we can also estimate the **censoring distribution** itself, i.e. the probability that an individual is censored beyond time $t$:
+
+$$G(t) = P(C > t)$$
+
+This is achieved by applying the Kaplan-Meier estimator with **reversed roles**: we treat censoring ($\delta = 0$) as the "event" and death ($\delta = 1$) as "censoring". This is sometimes called the **reverse Kaplan-Meier** estimator. Formally, let $c_{(1)} < c_{(2)} < \dots < c_{(K)}$ be the distinct observed censoring times. Then:
+
+$$\hat{G}_{KM}(t) = \prod_{k \mid c_{(k)} \leq t} \left(1 - \frac{m_k}{r_k}\right)$$
+
+where $r_k$ is the number of individuals still under observation just before $c_{(k)}$ and $m_k$ is the number of censorings at $c_{(k)}$.
+
+Understanding the censoring distribution is important for at least two reasons:
+
+1. **Validity of the KM estimate at $t = 1$ year.** If many patients are censored before the 1-year landmark, the KM estimator for $S(1)$ relies heavily on the **independent censoring assumption**. The more censoring occurs before $t = 1$, the more the estimate depends on this untestable assumption.
+
+2. **Inverse Probability of Censoring Weighting (IPCW).** Later in this lab (Question 9), we will compute performance measures (Brier Score, AUC) on the full dataset using methods that account for censoring by weighting each observed outcome by the inverse of the censoring probability $1/\hat{G}(t)$. These IPCW-based estimators require knowledge of the censoring distribution.
+
+```{r question2}
+fit.rev <- survfit(Surv(time.y, event == 0) ~ 1, data = htrap)
+
+plot(fit.rev,
+     xlab = "Years since transplant",
+     ylab = "Censoring probability G(t)",
+     main = "Reverse Kaplan-Meier: censoring distribution")
+
+summary(fit.rev, times = 1)
+
+n_cens_1y <- summary(fit.rev, times = 1)$n.event
+cat("Number of subjects censored within 1 year:", n_cens_1y, "\n")
+```
+
+The `survfit(Surv(time.y, event == 0) ~ 1)` call applies the standard Kaplan-Meier machinery but with **reversed roles**: the event indicator `event == 0` equals `TRUE` (i.e., 1) when the original observation is censored, and `FALSE` (i.e., 0) when the original observation is a death. This way, the Kaplan-Meier estimator tracks the "survival" of the censoring process—that is, the probability of **not yet being censored** by time $t$.
+
+As shown in the output, `summary(fit.rev, times = 1)` provides the following key insights at the 1-year mark:
+* **$\hat{G}(1)$**: The estimated probability that censoring has **not yet occurred** by 1 year is **0.909** (90.9%), with a 95% confidence interval of [**0.887**, **0.931**].
+* **`n.event`**: The actual number of subjects who were **censored** (in the original sense) before reaching 1 year is exactly **59** (out of **576** patients remaining at risk).
+
+The fact that 59 subjects are censored within the first year is a critical quantity. In this study, censoring is **administrative**: patients transplanted close to the end of the study window (e.g., late 2017) simply have a potential follow-up that is shorter than 1 year. These patients are alive at their last observation, but we do not know their vital status at exactly 1 year. They contribute to the risk set up to their censoring time and then drop out. Because this dropout number (59) is not negligible, the standard Kaplan-Meier estimate $\hat{S}_{KM}(1)$ calculated previously becomes slightly less reliable, as it heavily relies on the **independent censoring assumption** to handle these early dropouts.
+
+This limitation directly motivates **Question 3**, where we will restrict the analysis exclusively to patients transplanted before 01/01/2017. This restriction guarantees that all surviving patients have a potential follow-up of at least 1 year. In this restricted sample, no alive patient is censored before the 1-year landmark, meaning the event status at 1 year ($D_i = \mathbb{1}(T_i \leq 1)$) is fully observed for all subjects. Consequently, this makes subsequent calibration and discrimination assessments completely straightforward, removing the need for complex Inverse Probability of Censoring Weighting (IPCW) adjustments.
+
+\newpage
+
+# Question 3: Exclude patients with potential follow-up < 1 year
+
+*Exclude patients transplanted from 01/01/2017 onwards to obtain a sample where all alive patients have been observed for at least 1 year.*
+
+## Theoretical background
+
+As discussed in the course, the quality of a survival analysis depends critically on the **modalities of follow-up** and the **amount and cause of censoring**. The data maturity of a study is determined by the relationship between the recruitment period, the cut-off date for analysis, and the resulting **minimum potential follow-up**.
+
+In our dataset, patients were transplanted between 01/01/2012 and 31/12/2017, and the data were frozen at 31/12/2017. This means that patients transplanted during **2017** have a potential follow-up strictly less than 1 year. If such a patient is alive at their last observation, they are **administratively censored** before the 1-year landmark: we simply do not know their vital status at 1 year.
+
+This is problematic for the performance assessment tasks that follow (Questions 6--8). As introduced in the course slides, the performance of a risk predictor is evaluated by comparing the **predicted risk** $p_i$ with the **observed binary disease status** at a fixed time horizon $\tau$:
+
+$$D_i = \begin{cases} 1 & \text{if } T_i \leq \tau \quad (\text{case: event within } \tau) \\ 0 & \text{if } T_i > \tau \quad (\text{control: event-free beyond } \tau) \end{cases}$$
+
+Calibration (e.g. calibration plot, Brier Score) and discrimination (e.g. ROC curve, AUC) are defined in terms of $(D_i, p_i)$ pairs. For patients censored before $\tau$, $D_i$ is **unknown**: we observe $T_i < \tau$ with $\delta_i = 0$, so we cannot classify them as cases or controls.
+
+By restricting to patients transplanted **before 01/01/2017**, we guarantee that every patient has a potential follow-up $\geq 1$ year. In this restricted sample:
+
+- If a patient **died** within 1 year ($T_i \leq 1$, $\delta_i = 1$), then $D_i = 1$.
+- If a patient is **alive** at the last observation, their observed time is necessarily $T_i > 1$ (since they had at least 1 year of potential follow-up), so $D_i = 0$.
+
+This produces a sample where $D_i$ is **fully observed** for all subjects, and we can directly compute calibration and discrimination metrics without relying on censoring adjustments such as IPCW. This exclusion is **unbiased** because the selection criterion (transplant date) is determined before the time origin and is independent of the patient's subsequent survival trajectory.
+
+```{r question3}
+htrap.1y <- htrap[grepl(2017, htrap$date.htx) == FALSE, ]
+
+cat("Original sample size:", nrow(htrap), "\n")
+cat("Restricted sample size:", nrow(htrap.1y), "\n")
+cat("Patients excluded (transplanted in 2017):", nrow(htrap) - nrow(htrap.1y), "\n")
+
+table(htrap.1y$time.y > 1, htrap.1y$event)
+```
+
+The cross-tabulation is the key verification step. As shown in the output, the original sample of **805** patients has been reduced to a restricted sample of **746**, successfully excluding exactly **59** patients transplanted in 2017 (who lacked a potential 1-year follow-up). The table's rows indicate whether the observed time exceeds 1 year (`TRUE` / `FALSE`), and its columns indicate the event status (`0` = censored/alive, `1` = dead).
+
+In a well-constructed restricted sample, we expect the following, which is perfectly confirmed by our data:
+
+* **Row `FALSE`, column 0**: this cell should be **zero**, and indeed it is exactly **0**. It represents alive patients observed for less than 1 year — exactly the early administrative censoring situation we wanted to eliminate. A non-zero count here would indicate loss to follow-up before 1 year, which is a different censoring mechanism from administrative censoring and could introduce bias.
+* **Row `FALSE`, column 1**: patients who **died before 1 year**. The output shows **170** such patients. These are our "cases" ($D_i = 1$).
+* **Row `TRUE`, column 0**: patients who are **alive and observed beyond 1 year**. The output shows **533** such patients. These are our "controls" ($D_i = 0$).
+* **Row `TRUE`, column 1**: patients who **died after 1 year**. The output shows **43** such patients. For the purpose of predicting strictly 1-year mortality, these are also considered "controls" ($D_i = 0$), since they successfully survived beyond the 1-year landmark.
+
+From this point on, Questions 4--8 will work on this restricted dataset (e.g., `htrap.1y` with $N = 746$), where the binary outcome $D_i = \mathbb{1}(T_i \leq 1)$ is fully observed for all subjects. Consequently, performance assessment and model validation will not require complex censoring corrections (like IPCW).
+
+\newpage
+
+# Question 4: Kaplan-Meier survival and 1-year risk on the restricted sample
+
+*Working on the sample created in Q.3, estimate the overall Kaplan-Meier survival function and compute the estimated risk of death within 1 year after transplant.*
+
+## Theoretical background
+
+We now re-estimate the Kaplan-Meier survival function on the **restricted sample** (`htrap.1y`), which excludes patients transplanted in 2017. The estimator is the same as in Question 1:
+
+$$\hat{S}_{KM}(t) = \prod_{j \mid t_{(j)} \leq t} \left(1 - \frac{d_j}{n_j}\right)$$
+
+and the 1-year risk of death is:
+
+$$\hat{F}_{KM}(1) = 1 - \hat{S}_{KM}(1)$$
+
+However, the statistical properties of the estimate at $t = 1$ are now fundamentally different. In Question 1, many patients were administratively censored before 1 year, so $\hat{S}_{KM}(1)$ depended on the **independent censoring assumption**: subjects who were censored before 1 year were assumed to have the same future risk as those still under observation. This assumption is untestable.
+
+In the restricted sample, as verified by the cross-tabulation in Question 3, **no alive patient is censored before 1 year**. All censoring within 1 year (if any) comes from patients who actually died --- it does not exist, because alive patients all have $T_i > 1$. This means that at $t = 1$ the KM estimator is essentially a **simple proportion**: the number of deaths within 1 year divided by the total sample size. The estimate is free from any censoring bias at the 1-year horizon.
+
+This quantity, $\hat{F}_{KM}(1)$, also represents the **prevalence** of the binary outcome $D = \mathbb{1}(T \leq 1)$ in the restricted sample. As noted in the course slides, the prevalence $P(D = 1) = P(T \leq \tau)$ is a key quantity in the evaluation of risk predictors: it determines the marginal distribution of cases and controls against which calibration and discrimination will be assessed.
+
+```{r question4}
+fit <- survfit(Surv(time.y, event) ~ 1, data = htrap.1y)
+
+plot(fit,
+     xlab = "Years since transplant",
+     ylab = "Survival probability",
+     main = paste0("Overall Kaplan-Meier survival curve (N = ", nrow(htrap.1y), ")"))
+
+summary(fit, times = 1)
+
+risk_1y_restricted <- 1 - summary(fit, times = 1)$surv
+cat("Estimated 1-year risk of death (restricted sample):", 
+    round(risk_1y_restricted, 4), "\n")
+```
+
+Comparing the results with Question 1:
+
+* **Question 1** (full dataset, N = 805): The initial Kaplan-Meier survival estimate $\hat{S}_{KM}(1)$ was **0.787** (resulting in an estimated 1-year mortality risk of **0.2126**). It was computed in the presence of administrative censoring before 1 year. Patients transplanted in 2017 contributed to the risk set only up to their censoring time and then dropped out, making the estimate slightly less robust as it relied on the independent censoring assumption.
+* **Question 4** (restricted dataset, N = **746**): As shown in the new output, the Kaplan-Meier survival estimate at $t = 1$ is now **0.772**, with a 95% confidence interval of [**0.743**, **0.803**]. This estimate is significantly more robust because it no longer relies on the independent censoring assumption at the 1-year horizon. Since all censored observations before 1 year were removed, the data perfectly reflects the **170** observed events out of the initial 746 patients, leaving exactly **576** patients surviving at the 1-year mark. 
+
+Because the two estimated 1-year mortality risks (0.2126 vs. the new **0.2279**) are relatively close, this is reassuring. It suggests that the administrative censoring mechanism in the full dataset was indeed approximately independent and did not severely bias the original Kaplan-Meier estimate. The slight increase in the estimated risk simply reflects the removal of early-censored subjects from the denominator.
+
+Moving forward, the estimated 1-year risk $\hat{F}_{KM}(1)$ of **0.2279** from this restricted sample will serve as the **reference event rate** for the performance assessment of the Cox-based risk predictors developed in Question 5. Under perfect **calibration-in-the-large**, the average predicted risk across all patients should exactly equal this observed marginal event rate.
+
+\newpage
+
+# Question 5: Cox PH models and predicted 1-year risk of death
+
+*Working on the restricted sample, fit two Cox PH models and calculate, for each patient, the predicted risk of death within 1 year.*
+
+## Theoretical background
+
+The **Cox proportional hazards model**, introduced in the course, specifies the hazard function for an individual with covariate vector $\mathbf{x}$ as:
+
+$$\lambda(t; \mathbf{x}) = \lambda_0(t) \cdot \exp(\boldsymbol{\beta}' \mathbf{x})$$
+
+where $\lambda_0(t)$ is the **baseline hazard** (left completely unspecified) and $\exp(\boldsymbol{\beta}' \mathbf{x})$ is the parametric multiplicative covariate effect. The key properties of this model are:
+
+- The **hazard ratio** between any two individuals is constant over time (proportional hazards assumption): $HR = \exp[\boldsymbol{\beta}'(\mathbf{x}_1 - \mathbf{x}_2)]$.
+- Parameters $\boldsymbol{\beta}$ are estimated by maximising the **partial log-likelihood**, which depends only on $\boldsymbol{\beta}$ and not on $\lambda_0(t)$:
+
+$$LPL(\boldsymbol{\beta} \mid data) = \sum_{j=1}^{J} \boldsymbol{\beta}' \mathbf{x}_{(j)} - \log \left[\sum_{i \in R(t_{(j)})} \exp(\boldsymbol{\beta}' \mathbf{x}_i)\right]$$
+
+where $\mathbf{x}_{(j)}$ is the covariate vector of the subject failing at $t_{(j)}$ and $R(t_{(j)})$ is the risk set.
+
+### From model to individual predicted risk
+
+As shown in the course slides, the relationship between hazards translates directly into a relationship between survival functions:
+
+$$S(t; \mathbf{x}) = \left[\hat{S}_0(t)\right]^{\exp(\hat{\boldsymbol{\beta}}' \mathbf{x})}$$
+
+where $\hat{S}_0(t)$ is the **Breslow estimate** of the baseline survival function. This is obtained as:
+
+$$\hat{S}_0(t) = \prod_{j \mid t_{(j)} \leq t} \left[1 - \frac{d_j}{\sum_{i \in R(t_{(j)})} \exp(\hat{\boldsymbol{\beta}}' \mathbf{x}_i)}\right]$$
+
+which generalises the KM estimator by replacing the simple count $n_j$ with the sum of the estimated relative hazards over the risk set.
+
+The **predicted risk of death within 1 year** for patient $i$ is then:
+
+$$\hat{p}_i = 1 - \hat{S}(1; \mathbf{x}_i) = 1 - \left[\hat{S}_0(1)\right]^{\exp(\hat{\boldsymbol{\beta}}' \mathbf{x}_i)}$$
+
+### Simple vs enhanced risk predictor
+
+Following the notation from the course slides on risk predictor performance, we define two risk predictors:
+
+- $p_X = \hat{P}(D = 1 \mid \mathbf{X})$: the **simple** predictor, based on clinical variables only (gender, age, BMI category, status at transplant).
+- $p_{XY} = \hat{P}(D = 1 \mid \mathbf{X}, \mathbf{Y})$: the **enhanced** predictor, which adds laboratory biomarkers (creatinine, azotemia) to the simple predictor.
+
+The central question in risk prediction research is whether the additional biomarkers $\mathbf{Y}$ improve the predictive performance --- in terms of both **calibration** (accuracy of predicted values) and **discrimination** (ability to separate cases from controls). 
+
+```{r question5}
+# ------------------------------------------------------------------
+# Model 1 (simple): clinical variables only
+# ------------------------------------------------------------------
+model1 <- coxph(Surv(time.y, event == 1) ~ gender + age + bmi.cat + status,
+                data = htrap.1y)
+summary(model1)
+
+fit1 <- survfit(model1, newdata = htrap.1y)
+
+htrap.1y$riskdeath1 <- 1 - as.numeric(summary(fit1, times = 1)$surv)
+
+# ------------------------------------------------------------------
+# Model 2 (enhanced): clinical variables + biomarkers
+# ------------------------------------------------------------------
+model2 <- coxph(Surv(time.y, event == 1) ~ gender + age + bmi.cat + status + crea + azot,
+                data = htrap.1y)
+summary(model2)
+
+fit2 <- survfit(model2, newdata = htrap.1y)
+
+htrap.1y$riskdeath2 <- 1 - as.numeric(summary(fit2, times = 1)$surv)
+
+# ------------------------------------------------------------------
+# Summary of predicted risks
+# ------------------------------------------------------------------
+cat("--- Model 1 (simple: gender + age + bmi.cat + status) ---\n")
+summary(htrap.1y$riskdeath1)
+
+cat("\n--- Model 2 (enhanced: + crea + azot) ---\n")
+summary(htrap.1y$riskdeath2)
+```
+
+### Model summaries
+
+The `summary()` of each Cox model reports, for every covariate: the estimated coefficient $\hat{\beta}_k$, its standard error, the hazard ratio $\exp(\hat{\beta}_k)$, and the Wald test $p$-value for $H_0: \beta_k = 0$. Both models are fitted on the restricted dataset ($N = 746$, with 213 events). 
+
+In the clinical context of heart transplantation, the outputs confirm several expectations:
+
+* **Status at transplant:** This is a strong predictor. In Model 1, patients with `status2A` and `status2B` have a significantly lower hazard of death compared to the baseline (presumably status 1/urgent), with Hazard Ratios (HR) of **0.482** and **0.591**, respectively ($p < 0.001$).
+* **Age:** As expected, age significantly increases the risk of death (HR = **1.025** in Model 1, meaning a 2.5% hazard increase per year of age, $p < 0.001$).
+* **Gender and BMI:** Being male is associated with a higher risk (HR = **1.589**, $p = 0.007$). Severe obesity (`bmi.cat >= 30`) is marginally significant in Model 1 but becomes a significant risk factor in Model 2 (HR = **1.597**, $p = 0.033$).
+* **Renal function markers (Model 2):** The addition of creatinine and azotemia significantly enhances the model. Both are strong predictors of worse outcomes: `crea` has an HR of **1.250** ($p = 0.001$) and `azot` has an HR of **1.006** ($p < 0.001$). 
+
+The global tests at the bottom of each summary (Likelihood Ratio, Wald, and Score tests) are all highly significant ($p < 0.001$), confirming that the covariates collectively improve upon the null model. Furthermore, adding the renal markers improves the model's Concordance index from **0.637** (Model 1) to **0.664** (Model 2).
+
+### Predicted risk computation
+
+The code follows a two-step procedure for each model:
+1. `survfit(model, newdata = htrap.1y)` computes the estimated survival curve $\hat{S}(t; \mathbf{x}_i)$ for **every patient** in the dataset, using the Breslow estimate of the baseline survival $\hat{S}_0(t)$ raised to the power $\exp(\hat{\boldsymbol{\beta}}' \mathbf{x}_i)$.
+2. `summary(fit, times = 1)$surv` extracts $\hat{S}(1; \mathbf{x}_i)$, and the predicted risk is obtained as $\hat{p}_i = 1 - \hat{S}(1; \mathbf{x}_i)$.
+
+The resulting variables `riskdeath1` ($p_X$) and `riskdeath2` ($p_{XY}$) are patient-specific predicted probabilities of death within exactly 1 year. 
+
+Looking at the summary of these predicted risks, we can observe two critical properties:
+
+* **Spread:** The enhanced model (Model 2) produces a much wider range of predicted risks (from **3.4%** to **98.1%**) compared to the simple model (from **5.0%** to **66.9%**). This wider spread typically indicates better *discrimination* capability.
+* **Calibration-in-the-large:** The average predicted risk across all patients is **0.22845** for Model 1 and **0.22799** for Model 2. Notice how these mean values perfectly match the overall observed 1-year Kaplan-Meier risk estimate ($\hat{F}_{KM}(1) = 0.2279$) calculated in Question 4.
+
+These predicted probabilities will be formally evaluated against the observed binary outcome $D_i = \mathbb{1}(T_i \leq 1)$ in the following questions: **calibration** (Q.6--7) asks whether the predicted risks match the observed event rates across risk groups, while **discrimination** (Q.8) asks whether the predicted risks correctly rank cases above controls.
+
+*Note that at this stage we are computing predicted risks **on the same data used to fit the model** (apparent performance). This leads to **optimistic** estimates of performance due to overfitting. The correction for this over-optimism via bootstrap internal validation will be addressed in Question 9 on the full dataset.*
+
+\newpage
+
+# Question 6: Calibration plot for predicted risks
+
+*To check the model calibration, create the calibration plot for predicted risks of both models.*
+
+## Theoretical background
+
+**Calibration** answers the question: *"Is the risk prediction value close to the observed status?"* As presented in the course slides, calibration can be defined at two levels:
+
+- **Strong calibration**: the predicted risk equals the true conditional probability of the event given the covariates, $p_X = E(D \mid \mathbf{X})$. This is an ideal property that cannot be verified empirically.
+- **Weak calibration**: among all subjects who receive the same predicted risk $r$, the observed event rate equals $r$, i.e. $r = E(D \mid p_X = r)$. This is the property we can assess graphically.
+
+### The calibration plot
+
+The calibration plot is the standard graphical tool for assessing weak calibration. The construction follows these steps:
+
+1. **Partition** subjects into $G$ groups (typically $G = 10$ deciles) based on the quantiles of the predicted risk $\hat{p}_i$.
+2. Within each group $g = 1, \dots, G$, compute:
+   - The **observed event rate**: $\bar{D}_g = \frac{1}{n_g} \sum_{i \in g} D_i$, i.e. the proportion of cases ($D_i = 1$) in the group.
+   - The **average predicted risk**: $\bar{p}_g = \frac{1}{n_g} \sum_{i \in g} \hat{p}_i$.
+3. Plot $\bar{D}_g$ (y-axis) against $\bar{p}_g$ (x-axis) for each group.
+
+Under perfect weak calibration, all points lie on the **identity line** (dashed diagonal). Systematic departures indicate miscalibration:
+
+- Points **above** the diagonal $\Rightarrow$ the model **underestimates** risk (observed rate exceeds prediction).
+- Points **below** the diagonal $\Rightarrow$ the model **overestimates** risk (prediction exceeds observed rate).
+
+Since we are working on the restricted sample where $D_i = \mathbb{1}(T_i \leq 1)$ is fully observed for all subjects (see Q.3), we can compute the observed event rate directly without censoring adjustments.
+
+```{r question6}
+# ==================================================================
+# Calibration plot construction for Model 1 (riskdeath1 = p_X)
+# ==================================================================
+
+q1 <- quantile(htrap.1y$riskdeath1, probs = seq(0.1, 0.9, 0.1))
+
+riskclass1 <- ifelse(htrap.1y$riskdeath1 < q1[1], 1,
+               ifelse(htrap.1y$riskdeath1 < q1[2], 2,
+                ifelse(htrap.1y$riskdeath1 < q1[3], 3,
+                 ifelse(htrap.1y$riskdeath1 < q1[4], 4,
+                  ifelse(htrap.1y$riskdeath1 < q1[5], 5,
+                   ifelse(htrap.1y$riskdeath1 < q1[6], 6,
+                    ifelse(htrap.1y$riskdeath1 < q1[7], 7,
+                     ifelse(htrap.1y$riskdeath1 < q1[8], 8,
+                      ifelse(htrap.1y$riskdeath1 < q1[9], 9, 
+                             10)))))))))
+
+obsclass1 <- c()
+for (i in 1:10) {
+  ratio <- sum(htrap.1y$event[riskclass1 == i]) / sum(riskclass1 == i)
+  obsclass1 <- c(obsclass1, ratio)
+}
+
+meanriskclass1 <- c()
+for (i in 1:10) {
+  meanrisk <- mean(htrap.1y$riskdeath1[riskclass1 == i])
+  meanriskclass1 <- c(meanriskclass1, meanrisk)
+}
+
+# ==================================================================
+# Calibration plot construction for Model 2 (riskdeath2 = p_XY)
+# ==================================================================
+
+q2 <- quantile(htrap.1y$riskdeath2, probs = seq(0.1, 0.9, 0.1))
+
+riskclass2 <- ifelse(htrap.1y$riskdeath2 < q2[1], 1,
+               ifelse(htrap.1y$riskdeath2 < q2[2], 2,
+                ifelse(htrap.1y$riskdeath2 < q2[3], 3,
+                 ifelse(htrap.1y$riskdeath2 < q2[4], 4,
+                  ifelse(htrap.1y$riskdeath2 < q2[5], 5,
+                   ifelse(htrap.1y$riskdeath2 < q2[6], 6,
+                    ifelse(htrap.1y$riskdeath2 < q2[7], 7,
+                     ifelse(htrap.1y$riskdeath2 < q2[8], 8,
+                      ifelse(htrap.1y$riskdeath2 < q2[9], 9, 
+                             10)))))))))
+
+obsclass2 <- c()
+for (i in 1:10) {
+  ratio <- sum(htrap.1y$event[riskclass2 == i]) / sum(riskclass2 == i)
+  obsclass2 <- c(obsclass2, ratio)
+}
+
+meanriskclass2 <- c()
+for (i in 1:10) {
+  meanrisk <- mean(htrap.1y$riskdeath2[riskclass2 == i])
+  meanriskclass2 <- c(meanriskclass2, meanrisk)
+}
+
+# ==================================================================
+# Combined calibration plot
+# ==================================================================
+
+par(mar = c(5, 5, 1, 1))
+plot(meanriskclass1, obsclass1,
+     main = '', pch = 1, xlim = c(0, 1), cex = 1.5,
+     ylim = c(0, 1), lwd = 3,
+     ylab = 'Observed event rate',
+     xlab = 'Average risk within decile',
+     cex.lab = 1.7, cex.axis = 1.7,
+     xaxt = "n", yaxt = "n", frame = FALSE)
+axis(2, at = seq(0, 1, 0.2), cex.axis = 1.7, pos = 0)
+axis(1, at = seq(0, 1, 0.2), cex.axis = 1.7, pos = 0)
+
+points(meanriskclass2, obsclass2, lwd = 3, pch = 2, cex = 1.5)
+
+lines(c(0, 1), c(0, 1), lty = 2, lwd = 2)
+
+lines(c(0, 1), c(1, 1), lty = 1)
+lines(c(1, 1), c(0, 1), lty = 1)
+
+legend(x = 0, y = 1,
+       c("Model 1 (p_X)", "Model 2 (p_XY)"),
+       lwd = c(3, 3), pch = c(1, 2),
+       bty = 'n', cex = 1.8, lty = c(NA, NA))
+```
+
+The calibration plot provides a visual assessment of weak calibration for both risk predictors. Each point represents one decile of predicted risk: its x-coordinate is $\bar{p}_g$ (what the model predicts on average for that group) and its y-coordinate is $\bar{D}_g$ (what actually happened).
+
+### Reading the plot
+
+* **Points on the diagonal**: The model is well-calibrated in that risk range — meaning it accurately predicts what it observes. Looking at the plot, both models track the 45-degree reference line fairly well, indicating reasonable calibration across most deciles.
+* **Spread of points along the x-axis**: This reflects the model's ability to produce a **range** of risk predictions. A model that assigns nearly the same risk to everyone (poor discrimination) would cluster all points in a narrow band around the overall event rate, even if perfectly calibrated. A model that spreads predictions across a wider range is more informative.
+* **Model 1 (circles) vs. Model 2 (triangles)**: By overlaying both models, we can visually compare them. Notice how the triangles (Model 2, $p_{XY}$) extend further to the right along the x-axis, reaching an average risk within the top decile of about 0.50, compared to Model 1's highest decile at around 0.40. This visually confirms what we saw in the numerical summaries: adding creatinine and azotemia allows Model 2 to identify patients at a considerably higher predicted risk, demonstrating a wider spread of predictions while maintaining good calibration.
+
+### Connection to theory
+
+The calibration plot is related to the **Hosmer-Lemeshow test**, which formalizes the visual comparison into a $\chi^2$ goodness-of-fit test. However, the graphical approach shown here is strongly preferred in practice because it reveals the **direction** and **location** of miscalibration, while the test only provides a single, often uninformative, $p$-value.
+
+It is important to remember that calibration is **necessary but not sufficient** for a good risk predictor. A model that simply assigns the overall mean event rate $\hat{F}_{KM}(1)$ to every single patient would be perfectly calibrated (in the weak sense) but completely useless for clinical decision-making because it provides zero patient-specific information. The complementary property — **discrimination** — will be assessed in Question 8.
+
+Furthermore, since we are currently evaluating predictions on the **same data used to fit the model** (apparent calibration), these results are expected to be optimistically biased. The calibration assessed here reflects how well the models fit the training data, not necessarily how well they would perform on new, unseen patients. 
+
+\newpage
+
+# Question 7: Brier Score
+
+*Compare the calibration of the two risk predictors by calculating the Brier Score.*
+
+## Theoretical background
+
+The **Brier Score** (BrS), introduced in the course slides as a summary indicator of calibration, quantifies the average squared distance between the predicted risk $p_i$ and the observed binary outcome $D_i$:
+
+$$BrS = E\!\left[(D - p)^2\right] \approx \widehat{BrS} = \frac{1}{N} \sum_{i=1}^{N} (D_i - \hat{p}_i)^2$$
+
+where $D_i = \mathbb{1}(T_i \leq 1) \in \{0, 1\}$ is the observed disease status at $\tau = 1$ year and $\hat{p}_i$ is the predicted risk. A **lower** Brier Score indicates better overall predictive accuracy --- the ideal value is 0 (perfect prediction), while the worst case (always wrong) yields 1. A non-informative model that assigns the overall prevalence $\pi = P(D = 1)$ to every patient would have $BrS = \pi(1 - \pi)$.
+
+### Decomposition under strong calibration
+
+The Brier Score captures **both** calibration and discrimination in a single number. To isolate the contribution of miscalibration, the professor's script computes the Brier Score that would be achieved **under strong calibration**, i.e. assuming $p_i = P(D = 1 \mid \mathbf{X}_i)$ exactly. Under this ideal condition, since $D_i \mid p_i \sim \text{Bernoulli}(p_i)$, the expected squared error equals the variance of a Bernoulli random variable:
+
+$$BrS^{sc} = E\!\left[p(1 - p)\right] \approx \widehat{BrS}^{sc} = \frac{1}{N} \sum_{i=1}^{N} \hat{p}_i (1 - \hat{p}_i)$$
+
+This represents the **irreducible** component of the Brier Score: even a perfectly calibrated model cannot do better than $BrS^{sc}$ because of the inherent randomness in binary outcomes.
+
+The difference between the observed Brier Score and its value under strong calibration isolates the **miscalibration** component:
+
+$$\Delta = \widehat{BrS} - \widehat{BrS}^{sc}$$
+
+If the model is well-calibrated, $\Delta$ should be close to zero. A large $\Delta$ indicates that the predicted risks systematically deviate from the true conditional probabilities.
+
+```{r question7}
+htrap.1y$event.1y <- ifelse(htrap.1y$time.y <= 1, 1, 0)
+
+# ------------------------------------------------------------------
+# Brier Score: BrS = (1/N) * sum( (D_i - p_i)^2 )
+# ------------------------------------------------------------------
+(BS_1 <- mean((htrap.1y$event.1y - htrap.1y$riskdeath1)^2))
+(BS_2 <- mean((htrap.1y$event.1y - htrap.1y$riskdeath2)^2))
+
+cat("Brier Score Model 1 (p_X):", round(BS_1, 4), "\n")
+cat("Brier Score Model 2 (p_XY):", round(BS_2, 4), "\n")
+
+# ------------------------------------------------------------------
+# Brier Score under strong calibration: BrS_sc = (1/N) * sum( p_i * (1 - p_i) )
+# ------------------------------------------------------------------
+BS_1sc <- mean(htrap.1y$riskdeath1 * (1 - htrap.1y$riskdeath1))
+BS_2sc <- mean(htrap.1y$riskdeath2 * (1 - htrap.1y$riskdeath2))
+
+cat("Brier Score under strong calibration Model 1:", round(BS_1sc, 4), "\n")
+cat("Brier Score under strong calibration Model 2:", round(BS_2sc, 4), "\n")
+
+# ------------------------------------------------------------------
+# Miscalibration component: Delta = BrS - BrS_sc
+# ------------------------------------------------------------------
+cat("\nMiscalibration component Model 1 (Delta_1):", round(BS_1 - BS_1sc, 4), "\n")
+cat("Miscalibration component Model 2 (Delta_2):", round(BS_2 - BS_2sc, 4), "\n")
+```
+
+The Brier Score ($\widehat{BrS}$) provides a **single-number summary** of overall predictive accuracy, complementing the visual calibration plot from Question 6. A lower Brier Score indicates better performance (less prediction error). 
+
+When comparing the two models:
+* The simple model (Model 1, $p_X$) yields $\widehat{BrS}_1 =$ **0.1683**.
+* The enhanced model (Model 2, $p_{XY}$) yields $\widehat{BrS}_2 =$ **0.1630**.
+
+Because $\widehat{BrS}_2 < \widehat{BrS}_1$, the enhanced model (incorporating creatinine and azotemia) achieves better overall predictive accuracy than the simple model. The magnitude of the difference (a reduction of roughly 0.005) quantifies the tangible improvement in predictive accuracy attributable to these additional renal biomarkers.
+
+### Interpreting the decomposition
+
+The decomposition of the Brier Score into $\widehat{BrS}^{sc}$ (Brier Score under strong calibration) and $\Delta$ (Miscalibration component) provides deeper insight into *why* a model performs better:
+
+* **Spread ($\widehat{BrS}^{sc}$):** Calculated as $\frac{1}{N}\sum \hat{p}_i(1-\hat{p}_i)$, this term reflects the **spread** of the predicted risk distribution. A model that assigns more heterogeneous (i.e., closer to 0 or 1) risk values will have a **lower** $\widehat{BrS}^{sc}$, which is desirable because it indicates the model is more confident and varied in its predictions (better discrimination). 
+    * Model 1 $\widehat{BrS}^{sc}$ = **0.1676**
+    * Model 2 $\widehat{BrS}^{sc}$ = **0.1615**
+    * The lower value for Model 2 confirms our earlier observation (from the risk summaries) that adding the renal markers allows the model to spread out its predictions more effectively. Note that $\widehat{BrS}^{sc}$ depends *only* on the distribution of the predicted probabilities $\hat{p}_i$, not on the actual observed outcomes.
+
+* **Miscalibration Penalty ($\Delta$):** Calculated as $\widehat{BrS} - \widehat{BrS}^{sc}$, this isolates the penalty for poor calibration. If $\Delta \approx 0$, the model achieves the Brier Score that would be expected under perfect strong calibration. A positive $\Delta$ indicates that the actual Brier Score is worse than what calibration alone would predict, revealing systematic errors.
+    * Model 1 $\Delta$ = **0.0007** (7e-04)
+    * Model 2 $\Delta$ = **0.0014**
+    * Both values are extremely close to zero. This implies that almost the entirety of the overall Brier Score ($\widehat{BrS}$) is explained by the spread of the predictions ($\widehat{BrS}^{sc}$), with very little penalty for miscalibration. 
+
+### Connection to the calibration plot and overfitting
+
+The Brier Score and the calibration plot (Question 6) are complementary tools. The calibration plot visually reveals the **pattern** of miscalibration (e.g., whether the model overestimates risk for high-risk patients), while the Brier Score condenses accuracy into a single metric. As seen in our decomposition, a model can have a good (low) Brier Score primarily because it produces a wide, confident range of predicted risks (good discrimination), even if there is slight miscalibration. 
+
+**Important caveat:** Since we are currently evaluating predictions on the **exact same training data** used to fit the models, these apparent Brier Scores and miscalibration components ($\Delta$) are optimistically biased. The models were mathematically optimized to minimize discrepancies in this specific sample, so $\Delta$ will naturally be artificially small. 
+
+# Question 8: ROC curve, AUC, and Youden index
+
+*Check the discrimination performance of the two risk predictors using the ROC curve and AUC index. Find also the optimal cut-off value according to the Youden index.*
+
+## Theoretical background
+
+**Discrimination** answers the question: *"Is the risk prediction consistent in ranks?"* While calibration (Q.6--7) assessed whether predicted values match observed event rates, discrimination assesses whether the model assigns **higher risks to cases than to controls**. A perfectly calibrated model can still be useless if it assigns the same risk to everyone; a well-discriminating model separates the risk distributions of cases ($D = 1$) and controls ($D = 0$).
+
+### The ROC curve
+
+As presented in the course slides, a risk predictor $p$ can be turned into a **binary classification rule** at any threshold $r \in (0, 1)$: patients with $p \geq r$ are classified as "positive" (treat), patients with $p < r$ as "negative" (no treatment). For each threshold $r$, two quantities are defined:
+
+$$TPF(r) = P(\hat{p} \geq r \mid D = 1) \qquad \text{(True Positive Fraction = Sensitivity)}$$
+
+$$FPF(r) = P(\hat{p} \geq r \mid D = 0) \qquad \text{(False Positive Fraction = 1 - Specificity)}$$
+
+The **Receiver Operating Characteristic (ROC) curve** plots $TPF(r)$ on the y-axis against $FPF(r)$ on the x-axis as $r$ varies from 1 to 0. A model with perfect discrimination produces a curve that passes through the upper-left corner $(0, 1)$; a non-informative model (coin flip) lies on the diagonal.
+
+### Area Under the Curve (AUC)
+
+The **AUC** summarises the entire ROC curve into a single number:
+
+$$AUC = \int_0^1 TPF\!\left(FPF^{-1}(c)\right) dc$$
+
+Its probabilistic interpretation, from the course slides, is:
+
+$$AUC = P(p_i > p_j \mid D_i = 1, D_j = 0)$$
+
+i.e. the probability that a randomly chosen case receives a **higher predicted risk** than a randomly chosen control. An $AUC = 0.5$ indicates no discrimination (random guessing), $AUC = 1$ indicates perfect discrimination. The **performance increment** of the enhanced model over the simple model is measured by the difference:
+
+$$\Delta AUC = AUC_{XY} - AUC_X$$
+
+### Youden index and optimal cut-off
+
+For any threshold $r$, the **Youden index** is defined as:
+
+$$J(r) = TPF(r) - FPF(r) = \text{Sensitivity}(r) + \text{Specificity}(r) - 1$$
+
+This represents the vertical distance between the ROC curve and the chance diagonal. The **optimal cut-off** $r^*$ is the threshold that maximises $J(r)$:
+
+$$r^* = \arg\max_r \left[TPF(r) - FPF(r)\right]$$
+
+As shown in the course slides, the Youden index at a threshold $r$ can be interpreted as the **impact of a decision rule**: it measures the net gain in correct classification relative to random assignment. The optimal cut-off $r^*$ identifies the point on the ROC curve that is farthest from the diagonal, representing the best trade-off between sensitivity and specificity when false positives and false negatives are weighted equally.
+
+```{r question8, fig.height=7, fig.width=7}
+# ==================================================================
+# ROC curve for Model 1
+# ==================================================================
+roc1 <- roc(htrap.1y$event.1y, htrap.1y$riskdeath1)
+
+plot(1 - roc1$specificities, roc1$sensitivities,
+     type = 'l', ylab = 'TPF', xlab = 'FPF', lwd = 3,
+     xaxt = "n", yaxt = "n",
+     xlim = c(0, 1), cex.lab = 1.7, frame = FALSE)
+axis(1, at = c(0, 0.25, 0.5, 0.75, 1), labels = NA, pos = 0)
+axis(1, at = c(0, 0.25, 0.5, 0.75, 1),
+     labels = c(0, 0.25, 0.5, 0.75, 1), cex.axis = 1.7, pos = 0)
+axis(2, at = c(0, 0.25, 0.5, 0.75, 1),
+     labels = c(0, 0.25, 0.5, 0.75, 1), cex.axis = 1.7, pos = 0)
+
+Youden1 <- roc1$sensitivities + roc1$specificities - 1
+optimal.cut.off1 <- roc1$thresholds[Youden1 == max(Youden1)]
+cbind(optimal.cut.off1, Youden = max(Youden1))
+
+points(1 - roc1$specificities[roc1$thresholds == optimal.cut.off1],
+       roc1$sensitivities[roc1$thresholds == optimal.cut.off1],
+       pch = 0, cex = 1.7)
+
+# ==================================================================
+# ROC curve for Model 2 (overlay on the same plot)
+# ==================================================================
+roc2 <- roc(htrap.1y$event.1y, htrap.1y$riskdeath2)
+
+lines(1 - roc2$specificities, roc2$sensitivities,
+      lwd = 3, lty = 3)
+
+Youden2 <- roc2$sensitivities + roc2$specificities - 1
+optimal.cut.off2 <- roc2$thresholds[Youden2 == max(Youden2)]
+cbind(optimal.cut.off2, Youden = max(Youden2))
+
+points(1 - roc2$specificities[roc2$thresholds == optimal.cut.off2],
+       roc2$sensitivities[roc2$thresholds == optimal.cut.off2],
+       pch = 0, cex = 1.7)
+
+abline(a = 0, b = 1, lty = 2, lwd = 2)
+lines(c(0, 1), c(1, 1), lty = 1)
+lines(c(1, 1), c(0, 1), lty = 1)
+
+legend(x = 0, y = 1,
+       c("Model 1 (p_X)", "Model 2 (p_XY)"),
+       lwd = c(3, 3), lty = c(1, 3),
+       bty = 'n', cex = 1.7)
+
+# ==================================================================
+# AUC comparison
+# ==================================================================
+(AUC1 <- roc1$auc)
+(AUC2 <- roc2$auc)
+
+cat("\nAUC Model 1 (p_X):", round(as.numeric(AUC1), 4), "\n")
+cat("AUC Model 2 (p_XY):", round(as.numeric(AUC2), 4), "\n")
+cat("Delta AUC (Model 2 - Model 1):", round(as.numeric(AUC2 - AUC1), 4), "\n")
+
+cat("\nOptimal cut-off Model 1:", round(optimal.cut.off1, 4),
+    " | Youden:", round(max(Youden1), 4), "\n")
+cat("Optimal cut-off Model 2:", round(optimal.cut.off2, 4),
+    " | Youden:", round(max(Youden2), 4), "\n")
+```
+
+The ROC plot visually demonstrates the discrimination performance of both models. Model 1 (solid line, $p_X$) uses only clinical variables, while Model 2 (dashed line, $p_{XY}$) adds creatinine and azotemia. The further a ROC curve bows toward the upper-left corner, the better the model discriminates between cases (patients who died within 1 year) and controls (patients who survived). 
+
+As seen in the plot, the dashed curve for Model 2 is situated slightly above the solid curve for Model 1 across almost the entire range of False Positive Fractions (FPF). This visual separation confirms that the enhanced predictor, which includes the renal biomarkers, separates cases from controls more effectively at nearly every operating threshold.
+
+### AUC interpretation
+
+The Area Under the Curve (AUC) provides a single-number summary of this discrimination ability. It has a direct probabilistic meaning: it is the probability that a randomly selected case receives a higher predicted risk than a randomly selected control. 
+
+* The AUC for Model 1 is **0.6478**.
+* The AUC for Model 2 is **0.6832**.
+
+The improvement in discrimination obtained by adding creatinine and azotemia is quantified by the $\Delta$ AUC, which is **0.0354**. While this is a modest absolute increase, it represents a meaningful shift in the model's ability to correctly rank patients according to their true risk.
+
+### Youden index and clinical decision-making
+
+The optimal cut-offs (marked by small squares on the ROC curves) identify the thresholds at which each model achieves the theoretical "best" simultaneous trade-off between sensitivity and specificity (maximizing the Youden index: $Sensitivity + Specificity - 1$).
+
+* For Model 1, the optimal risk cut-off is **0.2270**, achieving a Youden index of **0.2502**.
+* For Model 2, the optimal risk cut-off is **0.2199**, achieving a higher Youden index of **0.2984**.
+
+In a simplified clinical scenario, a patient with a predicted risk $\hat{p}_i$ above these thresholds would be classified as "high risk" and might receive enhanced monitoring. However, relying solely on the Youden index implicitly assumes that the **cost of a false negative equals the cost of a false positive**, which is rarely appropriate in real clinical settings. In the context of heart transplantation, failing to identify a patient at high risk of death (a false negative) is arguably much more consequential than unnecessarily monitoring a lower-risk patient (a false positive). The **Decision Curve Analysis** (which will be addressed in Question 10) overcomes this limitation by explicitly incorporating the clinical cost-benefit trade-off.
+
+### Calibration vs discrimination
+
+It is crucial to remember that the AUC is a **pure rank statistic**: it depends entirely on the **relative ordering** of the predicted risks, not on their actual absolute values. Two models can have identical AUCs but possess vastly different calibration qualities. A model can be excellent at ranking patients (high discrimination) but terrible at assigning accurate absolute probabilities (poor calibration), or vice versa. Because a clinically useful risk predictor requires both accurate probabilities and good separation, this analysis evaluates them separately: calibration was assessed in Questions 6–7, discrimination is evaluated here in Question 8, and overall clinical utility (net benefit) will be evaluated in Question 10.
+
+\newpage
+
+# Question 9: Censoring-adjusted performance and bootstrap internal validation
+
+*Working on the original dataset ($N = 805$ patients), compute the Brier Score (adjusted for censoring) and the AUC index. Perform internal validation using bootstrap to correct for the over-optimism.*
+
+## Theoretical background
+
+### Why return to the full dataset?
+
+In Questions 5--8 we worked on the restricted sample (`htrap.1y`), where no alive patient was censored before 1 year and the binary outcome $D_i = \mathbb{1}(T_i \leq 1)$ was fully observed. This allowed a straightforward computation of Brier Score and AUC. However, this approach discarded all patients transplanted in 2017, reducing the sample size.
+
+Working on the **full dataset** ($N = 805$) is desirable because it uses all available information. The challenge is that some patients are **administratively censored** before 1 year: for these patients, $D_i$ is unknown. As noted in the course slides, analogous methods exist that accommodate right censoring --- these are based on **Inverse Probability of Censoring Weighting (IPCW)**.
+
+### IPCW-adjusted Brier Score
+
+The idea, proposed by Gerds \& Schumacher (2006), is to weight each subject's contribution to the Brier Score by the inverse of the probability of being uncensored at the relevant time. Let $\hat{G}(t)$ be the Kaplan-Meier estimate of the censoring distribution (the "reverse KM" from Question 2). The IPCW-adjusted Brier Score at time $\tau$ is:
+
+$$\widehat{BrS}^{IPCW}(\tau) = \frac{1}{N} \sum_{i=1}^{N} \left[\frac{(0 - \hat{p}_i)^2 \cdot \mathbb{1}(T_i > \tau)}{\hat{G}(\tau)} + \frac{(1 - \hat{p}_i)^2 \cdot \mathbb{1}(T_i \leq \tau, \delta_i = 1)}{\hat{G}(T_i)}\right]$$
+
+The logic is as follows: subjects who are observed to either die before $\tau$ or survive beyond $\tau$ provide a known $D_i$, but they are weighted by $1/\hat{G}(\cdot)$ to account for the "missing" subjects who were censored. Subjects censored before $\tau$ (unknown $D_i$) are effectively represented by the surviving and dead subjects who are given extra weight.
+
+### The `Score` function from `riskRegression`
+
+The `Score()` function in the `riskRegression` package implements IPCW-based estimation of both the Brier Score and the time-dependent AUC for survival data, as described by Gerds \& Schumacher (2006). It takes fitted Cox models as input (rather than pre-computed predicted risks), which is important because it needs to **refit** the models during bootstrap resampling.
+
+A technical requirement: the Cox models must be fitted with `x = TRUE` so that the design matrix is stored inside the model object. This is needed by `Score()` to refit the model on bootstrap samples.
+
+### The 7 steps and validation
+
+As presented in the course slides (Steyerberg, 2009), the development of a clinical prediction model follows **7 steps**, the 5th of which is the **assessment of predictive performance**. The course further distinguishes:
+
+- **Apparent performance**: evaluated on the same data used to fit the model. It is optimistically biased because the model has been tuned to this specific sample. This is what we computed in Questions 6--8.
+- **Internal validation**: uses resampling methods (e.g. bootstrap) on the development data to estimate how much of the apparent performance is due to overfitting and to produce a corrected, less optimistic estimate.
+- **External validation**: evaluates the model on an independent dataset. This is the gold standard but requires a separate study.
+
+### Bootstrap correction for over-optimism
+
+The bootstrap procedure implemented by `Score()` with `split.method = "loob"` (leave-one-out bootstrap) works as follows:
+
+1. Draw $B$ bootstrap samples (with replacement) from the original data.
+2. For each bootstrap sample $b$:
+   - Refit the Cox model on the bootstrap sample.
+   - Compute the apparent performance on the bootstrap sample $\rightarrow$ $\widehat{Perf}^{boot}_b$.
+   - Compute the performance of the bootstrap-fitted model on the **original** data $\rightarrow$ $\widehat{Perf}^{orig}_b$.
+   - The **optimism** for sample $b$ is: $O_b = \widehat{Perf}^{boot}_b - \widehat{Perf}^{orig}_b$.
+3. The average optimism is $\bar{O} = \frac{1}{B}\sum_{b=1}^{B} O_b$.
+4. The **corrected performance** is: $\widehat{Perf}^{corrected} = \widehat{Perf}^{apparent} - \bar{O}$.
+
+This yields an honest estimate of how the model would perform on future patients from the same population.
+
+```{r question9-models}
+model1 <- coxph(Surv(time.y, event == 1) ~ gender + age + bmi.cat + status,
+                data = htrap, x = TRUE)
+summary(model1)
+
+fit1 <- survfit(model1, newdata = htrap)
+htrap$riskdeath1 <- 1 - as.numeric(summary(fit1, times = 1)$surv)
+
+model2 <- coxph(Surv(time.y, event == 1) ~ gender + age + bmi.cat + status + crea + azot,
+                data = htrap, x = TRUE)
+summary(model2)
+
+fit2 <- survfit(model2, newdata = htrap)
+htrap$riskdeath2 <- 1 - as.numeric(summary(fit2, times = 1)$surv)
+```
+
+```{r question9-score}
+score <- Score(list("model1" = model1, "model2" = model2),
+               formula = Surv(time.y, event == 1) ~ 1,
+               data = htrap, conf.int = TRUE,
+               times = seq(1, 5, 1),
+               plots = c("calibration", "ROC"))
+
+plotROC(score, times = 1, cens.method = "local")
+title(main = "Time-dependent ROC at 1 year")
+
+plotROC(score, times = 3, cens.method = "local")
+title(main = "Time-dependent ROC at 3 years")
+
+plotCalibration(score, times = 1, cens.method = "local", method = "quantile", q = 10)
+title(main = "Calibration at 1 year")
+
+plotCalibration(score, times = 3, cens.method = "local", method = "quantile", q = 10)
+title(main = "Calibration at 3 years")
+```
+
+```{r question9-bootstrap}
+CVscore <- Score(list("model1" = model1, "model2" = model2),
+                 formula = Surv(time.y, event == 1) ~ 1,
+                 data = htrap, conf.int = TRUE,
+                 times = seq(1, 5, 1),
+                 split.method = "loob", B = 100, seed = 1803)
+
+CVscore
+```
+
+The initial output of the Cox models (`coxph` with `x = TRUE`) and the subsequent evaluation using the `Score()` function provide the **apparent** IPCW-adjusted performance metrics (Brier Score and AUC) computed on the full dataset ($N = 805$, 213 events). 
+
+The outputs from the cross-validation and bootstrap procedures (e.g., the data frames showing `times`, `model`, `AUC`, `Brier`) provide the **corrected** estimates. The key columns to compare are:
+* **Brier Score (lower is better):** For example, at 1 year, the Null model has a Brier score of **16.8** (16.8%), Model 1 has **16.4**, and Model 2 (from the calibration plot) has **15.6**. These values incorporate the necessary correction for optimism.
+* **AUC (higher is better):** At 1 year, the bootstrap-corrected AUC for Model 1 is **62.6%**, while Model 2 achieves **66.1%**. Notice how these corrected AUCs are slightly lower than the apparent AUCs calculated in Question 8 (which were 64.8% and 68.3%, respectively). 
+
+The difference between the apparent performance on the training data and these corrected values represents the estimated **optimism**. Because the optimism here is relatively small (e.g., a drop of about 2% in AUC), it suggests the models are not severely overfitted and should generalize reasonably well to similar patients.
+
+### Time-dependent assessment
+
+The `Score()` function evaluates performance at multiple time horizons ($\tau = 1, 2, 3, 4, 5$ years). This is clinically highly informative because a model's predictive accuracy often degrades over time. 
+* Looking at the AUC table, Model 2's discrimination peaks around 1-3 years (AUCs around **66%**) but drops to **63.2%** at 4 years. 
+* We can visually confirm this in the ROC plots: the ROC curve for Model 2 at 1 year (AUC **68.4** apparent) and at 3 years (AUC **68.9** apparent) look very similar, maintaining a clear advantage over Model 1.
+
+The `delta.AUC` table formally tests this difference. At $t=1$, Model 2 significantly outperforms Model 1 ($\Delta$ AUC = **3.4**, $p = 0.007$). This significant improvement holds at $t=2$ and $t=3$ but becomes less pronounced over time.
+
+### IPCW vs restricted sample approach
+
+The two approaches we used to handle censoring should yield broadly consistent results at the $\tau = 1$ year mark:
+* The **restricted sample** approach (Questions 3--8, $N = 746$) guaranteed fully observed outcomes but sacrificed sample size.
+* The **IPCW approach** used here in Question 9 retains all 805 patients, applying Inverse Probability of Censoring Weights to account for those censored early.
+
+Looking at the 1-year calibration plot generated via IPCW, the curves for Model 1 and Model 2 track the diagonal reference line very closely, mirroring the strong calibration we saw in the restricted sample (Question 6). This consistency is reassuring: it confirms that the administrative censoring mechanism is indeed approximately independent and that the IPCW correction is functioning correctly.
+
+### Connection to the model development pipeline
+
+As outlined in standard prognostic modeling guidelines (e.g., Steyerberg), the development workflow proceeds: **model development** $\rightarrow$ **internal validation** (assessing optimism) $\rightarrow$ **external validation** $\rightarrow$ **clinical application**. 
+
+This question completes the rigorous internal validation step. Because the bootstrap-corrected performance is satisfactory (specifically for Model 2, which maintains an AUC > 65% and good calibration up to 3 years), this model would be a strong candidate for external validation on an independent transplant cohort. 
+
+*(Technical note: The option `x = TRUE` in the initial `coxph()` calls is crucial. It stores the full design matrix within the model object, which is strictly required for the `Score()` function to successfully refit the models across the 100 bootstrap samples.)*
+
+\newpage
+
+# Question 10: Decision curve analysis — Expected Net Benefit
+
+*Calculate and plot the expected Net Benefit according to the risk threshold for both risk predictors.*
+
+## Theoretical background
+
+### From calibration and discrimination to clinical utility
+
+Questions 6--8 assessed **calibration** ("Is the predicted risk accurate?") and **discrimination** ("Does the model rank patients correctly?"). However, as emphasised in the course slides, these properties are necessary but not directly informative about whether the model is clinically useful. A model with excellent AUC can still be harmful if it is poorly calibrated, and even a well-calibrated, well-discriminating model may not outperform simpler strategies such as treating everyone or treating no one. The final question is: *"Is the risk prediction useful?"*, which asks about the **clinical impact** of using the model to guide treatment decisions.
+
+### Binary classification and the cost-benefit trade-off
+
+As introduced in the course, a risk predictor $p$ is converted into a clinical decision via a **binary classification rule** at a threshold $r \in (0, 1)$:
+
+$$\hat{p}_i \geq r \Rightarrow \text{treat} \qquad ; \qquad \hat{p}_i < r \Rightarrow \text{no treatment}$$
+
+Each classification has consequences: treating a true case ($D = 1$) yields a **benefit** of 1, while treating a false positive ($D = 0$) incurs a **cost** $C$ of over-treatment. The **Net Benefit** for a single individual with predicted risk $p_X$ is:
+
+$$NB(p_X) = 1 \cdot P(D = 1 \mid p_X) - C \cdot P(D = 0 \mid p_X) = p_X - C(1 - p_X)$$
+
+### Expected Net Benefit
+
+As shown in the course slides (Vickers \& Elkin, 2006), the **Expected Net Benefit** from treating all subjects with $p_X > r$ is:
+
+$$ENB(r) = 1 \cdot \hat{P}(D = 1 \mid p_X > r) - C \cdot \hat{P}(D = 0 \mid p_X > r)$$
+
+$$= TPF(r) \cdot \hat{\rho} - C \cdot FPF(r) \cdot (1 - \hat{\rho})$$
+
+where $\hat{\rho} = P(D = 1)$ is the prevalence.
+
+### Net Benefit given the operative threshold
+
+In the decision curve framework, the cost $C$ is not specified directly. Instead, $C$ is **derived from the threshold** $r$: a clinician who would treat at threshold $r$ implicitly considers a false positive $r/(1-r)$ times as harmful as a missed true positive. The cost is therefore:
+
+$$C = \frac{r}{1 - r}$$
+
+Substituting into the ENB formula:
+
+$$ENB(r) = TPF(r) \cdot \hat{\rho} - \frac{r}{1 - r} \cdot FPF(r) \cdot (1 - \hat{\rho})$$
+
+This is the standard **net benefit** plotted on the y-axis of a decision curve. The x-axis is the threshold probability $r$, which can be interpreted as the clinician's **preference** (how risk-averse they are).
+
+### Reference strategies
+
+The decision curve compares the model to two default strategies:
+
+- **Treat all** ($r \to 0$): every patient receives treatment. $TPF = FPF = 1$, so $ENB^{all}(r) = \hat{\rho} - \frac{r}{1 - r}(1 - \hat{\rho})$. This is optimal for very low thresholds (when the cost of missing a case is very high relative to over-treatment).
+- **Treat none** ($r \to 1$): no patient receives treatment. $TPF = FPF = 0$, so $ENB^{none}(r) = 0$. This is the horizontal zero line.
+
+A risk predictor is clinically useful at threshold $r$ **only if** its net benefit exceeds both the "treat all" and the "treat none" curves. As stated in the Vickers et al.\ (2019) guide, the unit of net benefit is **true positives per patient**: a net benefit of 0.07 means the strategy is equivalent to correctly identifying 7 patients per 100 while performing no unnecessary interventions.
+
+### Why AUC alone is insufficient
+
+Crucially, net benefit depends on **both discrimination and calibration**. As noted in the Vickers et al.\ (2019) guide, a model can have an AUC better than 0.5 yet still produce a net benefit worse than "treat all" or "treat none" if it is poorly calibrated. This is why decision curve analysis is recommended as the final evaluation step --- it integrates all aspects of predictive performance into a single clinically interpretable framework.
+
+```{r question10, fig.height=6, fig.width=8}
+library(dcurves)
+
+dca(Surv(time.y, event == 1) ~ riskdeath1 + riskdeath2,
+    data = htrap,
+    time = 1)
+```
+
+The `dca()` function produces a plot that evaluates the clinical utility of our predictive models:
+* **x-axis (Threshold Probability $r$):** This represents the clinician's preference or acceptable trade-off between the benefits of true positives and the harms of false positives. Low thresholds correspond to risk-averse clinicians (willing to treat many patients to avoid missing a single case); high thresholds correspond to clinicians who only want to treat patients they are very confident are at high risk.
+* **y-axis (Net Benefit):** A composite metric where higher is better. It represents the proportion of true positives, penalized by the proportion of false positives weighted by the threshold probability.
+* **Red line ("Treat All"):** The net benefit of treating every single patient, assuming everyone is high risk. This line starts high but steeply decreases as $r$ increases, crossing zero around $r \approx 0.22$, because at higher thresholds the defined cost of over-treating false positives quickly outweighs the benefit.
+* **Horizontal green line at 0 ("Treat None"):** The net benefit of treating nobody. By definition, this is always zero (no true positives, but also no false positives).
+* **Model curves (Cyan for `riskdeath1`, Purple for `riskdeath2`):** The net benefit achieved if treatment decisions are guided by the predicted risks from our respective models.
+
+### Clinical interpretation
+
+The decision curve should be interpreted by looking at different ranges of the threshold probability $r$:
+* **At very low thresholds ($r < 0.10$):** If a clinician's threshold for intervention is extremely low, the "Treat All" strategy yields a net benefit virtually identical to using either model. In this range, the models add little clinical value because almost everyone would trigger an intervention anyway.
+* **At moderate, clinically relevant thresholds ($r \approx 0.15 - 0.40$):** This is where a model proves its worth. Looking at the plot, as the "Treat All" line plummets, both model curves stay significantly above both the "Treat All" and "Treat None" lines. By using the models in this range, a clinician can identify high-risk patients for necessary intervention while successfully sparing lower-risk patients from unnecessary, potentially harmful treatments.
+* **At very high thresholds ($r > 0.50$):** Very few patients have predicted risks this high. Consequently, using the model leads to very few interventions (few true positives), and the net benefit for all strategies approaches zero.
+
+### Comparing the two models
+
+The true value of adding creatinine and azotemia (Model 2, `riskdeath2`, purple line) is revealed here. 
+Notice how, starting around a threshold of $r = 0.20$ and extending out past $r = 0.50$, the purple curve (`riskdeath2`) consistently stays above the cyan curve (`riskdeath1`). 
+
+This consistent separation indicates that the enhanced model (with renal biomarkers) provides genuine **clinical utility** over the simpler clinical model. It doesn't just improve statistical metrics like the AUC; it actually translates into better clinical decision-making across a wide range of reasonable clinical preferences. As noted in the course references (e.g., Baker et al., 2014), a small increase in AUC does not always guarantee a meaningful improvement in decision-making, making the DCA the definitive test for clinical usefulness.
+
+### Connection to the full analytical pipeline
+
+This question represents the culmination of the logical progression followed throughout this lab:
+$$\textbf{Describe} \text{ (Q.1--4)} \rightarrow \textbf{Model} \text{ (Q.5)} \rightarrow \textbf{Calibrate} \text{ (Q.6--7)} \rightarrow \textbf{Discriminate} \text{ (Q.8)} \rightarrow \textbf{Validate} \text{ (Q.9)} \rightarrow \textbf{Decide} \text{ (Q.10)}$$
+
+* The Kaplan-Meier estimator (Q.1--4) provided the descriptive baseline.
+* The Cox models (Q.5) translated clinical variables into patient-specific risk predictions.
+* Calibration (Q.6--7) and discrimination (Q.8) assessed the statistical accuracy of those predictions.
+* Internal validation (Q.9) ensured the metrics weren't artificially inflated by overfitting.
+* Finally, this **Decision Curve Analysis (Q.10)** answers the ultimate question: *Does using this model to guide clinical decisions actually produce better outcomes than default strategies?* The plot clearly shows the answer is yes. This mirrors the standard pipeline for clinical prediction model development (e.g., Steyerberg, 2009) emphasized in the course.
+
+\newpage
+
+# Concluding remarks: A Didactic Summary of Risk Prediction and Performance Assessment
+
+## The Big Picture
+
+This lab walked through the complete workflow of developing and evaluating a clinical risk prediction model, from nonparametric survival estimation to decision-theoretic assessment of clinical utility. The dataset --- 805 heart transplant recipients observed over the period 2012--2017 --- provided the ideal context to apply every major concept from the course on the performance of risk predictors. Let us retrace the logical thread that connects all 10 questions and extract the key lessons.
+
+## Part I: The Survival Foundation (Questions 1--4)
+
+The starting point of any risk prediction exercise in the survival setting is the **Kaplan-Meier estimator**. Before building any model, we need to understand the raw data: what is the overall probability of surviving beyond the time horizon of interest? The KM estimator answers this nonparametrically:
+
+$$\hat{S}_{KM}(t) = \prod_{j \mid t_{(j)} \leq t} \left(1 - \frac{d_j}{n_j}\right)$$
+
+and the complementary **cumulative incidence** $\hat{F}_{KM}(t) = 1 - \hat{S}_{KM}(t)$ gives us the unadjusted risk of death by time $t$.
+
+However, a critical lesson from the course is that survival estimates are only as reliable as the **censoring mechanism** allows. In this dataset, censoring is administrative: patients transplanted late in the study window have a short potential follow-up and may be censored before the 1-year landmark. The key assumption underlying the KM estimator --- that censoring is **independent** of the failure process --- is untestable, and the more censoring occurs before the time of interest, the more the estimate depends on this assumption.
+
+This motivated two complementary strategies that the lab explored in parallel:
+
+- **Restricting the sample** (Q.3): by excluding patients transplanted in 2017, we guaranteed that every surviving patient had been observed for at least 1 year. In this restricted sample, the binary outcome $D_i = \mathbb{1}(T_i \leq 1)$ was fully observed, and all subsequent performance assessments (Q.4--8) could be computed as simple averages without any censoring correction. This is conceptually clean but sacrifices sample size.
+
+- **Inverse Probability of Censoring Weighting** (Q.9): by estimating the censoring distribution $\hat{G}(t)$ via the reverse KM estimator (Q.2) and weighting each observation by $1/\hat{G}(\cdot)$, we could work on the full dataset ($N = 805$) while properly accounting for the missing outcomes of censored patients. This approach, formalised by Gerds \& Schumacher (2006), is more efficient but requires the independent censoring assumption and a good estimate of $\hat{G}(t)$.
+
+The consistency between results from these two approaches (restricted sample vs IPCW on the full sample) serves as an important internal check: if both yield similar performance estimates, it suggests that the censoring mechanism is approximately independent and neither approach is introducing substantial bias.
+
+## Part II: From the Cox Model to Individual Risk Predictions (Question 5)
+
+The Cox proportional hazards model, the semiparametric workhorse of survival analysis, bridges the gap between population-level survival curves and **patient-specific risk predictions**. Its key structural equation:
+
+$$\lambda(t; \mathbf{x}) = \lambda_0(t) \cdot \exp(\boldsymbol{\beta}' \mathbf{x})$$
+
+separates the time dimension (left nonparametric in the baseline hazard $\lambda_0(t)$) from the covariate effects (parameterised as a multiplicative exponential). The beauty of this formulation is that the regression coefficients $\boldsymbol{\beta}$ are estimated via the **partial likelihood**, which does not require specifying $\lambda_0(t)$ --- a remarkable statistical achievement that underpins the model's flexibility.
+
+Once $\hat{\boldsymbol{\beta}}$ is estimated, individual predicted risks are obtained through the fundamental relationship:
+
+$$\hat{S}(t; \mathbf{x}_i) = \left[\hat{S}_0(t)\right]^{\exp(\hat{\boldsymbol{\beta}}' \mathbf{x}_i)} \qquad \Longrightarrow \qquad \hat{p}_i = 1 - \hat{S}(1; \mathbf{x}_i)$$
+
+where $\hat{S}_0(t)$ is the Breslow estimate of the baseline survival. This formula has a powerful intuitive interpretation: the baseline survival $\hat{S}_0(t)$ describes a "reference" patient, and the individual's covariate profile $\mathbf{x}_i$ raises this baseline to a power that either compresses (high risk) or stretches (low risk) the survival curve.
+
+In this lab we built two nested predictors following the course notation:
+
+- $p_X = \hat{P}(D = 1 \mid \mathbf{X})$: the **simple** predictor, using only clinical variables (gender, age, BMI, transplant status).
+- $p_{XY} = \hat{P}(D = 1 \mid \mathbf{X}, \mathbf{Y})$: the **enhanced** predictor, adding laboratory biomarkers (creatinine, azotemia).
+
+The central scientific question is whether the additional biomarkers $\mathbf{Y}$ improve predictive performance. This question cannot be answered by looking at hazard ratios or $p$-values alone --- it requires a dedicated assessment of calibration, discrimination, and clinical utility.
+
+## Part III: Calibration — "Is the Risk Prediction Accurate?" (Questions 6--7)
+
+Calibration is the first pillar of performance assessment. As defined in the course slides, it asks whether the predicted risk values are **close to the observed outcomes**. Two levels of calibration were distinguished:
+
+- **Strong calibration**: $p_X = E(D \mid \mathbf{X})$. The predicted risk equals the true conditional probability. This is the ideal but is not directly verifiable.
+- **Weak calibration**: $r = E(D \mid p_X = r)$. Among all patients who receive a predicted risk of $r$, the observed event rate is indeed $r$. This is the property assessed by the **calibration plot**.
+
+The calibration plot is built by dividing patients into deciles of predicted risk and comparing, within each decile, the average predicted risk ($\bar{p}_g$, x-axis) with the observed event rate ($\bar{D}_g$, y-axis). Under perfect weak calibration, all 10 points lie on the identity diagonal. Points above the diagonal indicate underestimation (the model is too optimistic); points below indicate overestimation.
+
+The **Brier Score** provides a single-number summary:
+
+$$BrS = \frac{1}{N}\sum_{i=1}^{N}(D_i - \hat{p}_i)^2$$
+
+Lower values indicate better accuracy. A key insight from the lab is the decomposition into an irreducible component under strong calibration and a miscalibration component:
+
+$$BrS = \underbrace{\frac{1}{N}\sum \hat{p}_i(1 - \hat{p}_i)}_{BrS^{sc} \text{ (irreducible)}} + \underbrace{\Delta}_{\text{miscalibration}}$$
+
+The irreducible part $BrS^{sc} = E[p(1-p)]$ reflects the inherent variance of Bernoulli outcomes: even a perfectly calibrated model cannot eliminate it. This component is **smaller** when the model produces more extreme (heterogeneous) predicted risks, which is a desirable property related to discrimination. The miscalibration $\Delta = BrS - BrS^{sc}$ should be close to zero for a well-calibrated model. When evaluating on training data (apparent performance), $\Delta$ tends to be artificially small due to overfitting.
+
+## Part IV: Discrimination — "Is the Risk Prediction Consistent in Ranks?" (Question 8)
+
+Discrimination is the second pillar. It asks whether the model assigns **higher risks to patients who actually experience the event** (cases) than to those who do not (controls). Unlike calibration, discrimination is a **rank** property: it depends on the ordering of predicted risks, not on their absolute values.
+
+The **ROC curve** visualises discrimination by plotting, for every possible classification threshold $r$:
+
+$$TPF(r) = P(\hat{p} \geq r \mid D = 1) \quad \text{vs} \quad FPF(r) = P(\hat{p} \geq r \mid D = 0)$$
+
+The closer the curve bows toward the upper-left corner, the better the model separates cases from controls. The **AUC** condenses this into a single number with a direct probabilistic interpretation from the course:
+
+$$AUC = P(p_i > p_j \mid D_i = 1, D_j = 0)$$
+
+i.e. the probability that a randomly chosen case receives a higher predicted risk than a randomly chosen control. The increment $\Delta AUC = AUC_{XY} - AUC_X$ quantifies the discriminative gain from adding biomarkers.
+
+The **Youden index** $J(r) = TPF(r) - FPF(r)$ identifies the threshold at which the model achieves the best trade-off between sensitivity and specificity. It corresponds to the point on the ROC curve farthest from the diagonal. However, as emphasised in the course, the Youden index implicitly assumes that the cost of a false negative equals the cost of a false positive --- an assumption that is rarely justified in clinical practice. This limitation motivates the decision curve analysis.
+
+## The Calibration--Discrimination Duality
+
+One of the most important conceptual lessons from this lab is that calibration and discrimination are **independent, complementary properties**. A model can be perfectly calibrated yet useless (assigning the overall prevalence to every patient), and a model can be perfectly discriminating yet poorly calibrated (ranking patients correctly but systematically overestimating or underestimating risk). Only a model that excels at both is clinically valuable.
+
+The Brier Score is the unique indicator that captures **both** properties in a single number: its irreducible component $BrS^{sc}$ is related to the spread of predicted risks (which is connected to discrimination), while the miscalibration component $\Delta$ directly measures calibration failure. This makes the Brier Score particularly valuable as an overall performance metric.
+
+## Part V: Internal Validation — Correcting for Over-Optimism (Question 9)
+
+A fundamental principle from the Steyerberg (2009) framework, presented in the course slides as the "7 steps for clinical prediction model development", is that **apparent performance** (evaluated on training data) is always optimistically biased. The model has been tuned to the idiosyncrasies of the specific sample, and its performance on new patients will inevitably be worse.
+
+**Internal validation** via bootstrap resampling provides an honest estimate. The procedure:
+
+1. Draw $B$ bootstrap samples with replacement.
+2. For each sample: refit the model, compute apparent performance on the bootstrap sample, and evaluate performance of the bootstrap model on the original data.
+3. The difference (optimism) is averaged across all $B$ samples.
+4. The corrected performance is: apparent $-$ average optimism.
+
+This correction nudges the Brier Score upward and the AUC downward, producing estimates that better reflect how the model would perform on future patients from the same population. A large optimism correction signals overfitting and suggests the model may need simplification (fewer predictors, regularisation, or penalised estimation).
+
+In the survival context, the `Score()` function from the `riskRegression` package handles both the **IPCW adjustment** for censoring and the **bootstrap correction** for over-optimism simultaneously, providing a rigorous assessment on the full dataset.
+
+The course flowchart places internal validation as the first gate: *"Is the risk prediction accurate?"* If the answer is no, the model must be revised before proceeding to external validation and clinical use.
+
+## Part VI: Clinical Utility — "Is the Risk Prediction Useful?" (Question 10)
+
+The final and most consequential question is not statistical but clinical: does using the model to guide treatment decisions produce **better outcomes** than simpler strategies? This is the domain of **decision curve analysis** (Vickers \& Elkin, 2006).
+
+The key insight, developed in the course slides, is that a risk predictor $p$ becomes clinically actionable only when combined with a **treatment threshold** $r$: treat if $\hat{p} \geq r$, do not treat otherwise. Each threshold $r$ implies a cost-benefit ratio $C = r/(1-r)$, reflecting how many unnecessary treatments a clinician is willing to accept to avoid missing one case. The **Expected Net Benefit** at threshold $r$ is:
+
+$$ENB(r) = TPF(r) \cdot \hat{\rho} - \frac{r}{1-r} \cdot FPF(r) \cdot (1 - \hat{\rho})$$
+
+The decision curve plots $ENB(r)$ against $r$ for the model and the two reference strategies ("treat all" and "treat none"). A model is clinically useful at threshold $r$ only if its net benefit exceeds both references.
+
+Decision curve analysis has a profound implication that the course emphasises: **a model with a good AUC can still be clinically harmful**. As noted in the Vickers et al.\ (2019) guide, if a model systematically underestimates risk (poor calibration), patients at high risk may receive reassuringly low predicted values and forgo treatment. The AUC would be unaffected --- it depends only on ranks --- but the net benefit would plummet. This is why calibration, discrimination, and net benefit must all be assessed, and why the decision curve is the ultimate arbiter of clinical value.
+
+## The Complete Pipeline
+
+Looking back, the 10 questions form a coherent analytical pipeline that mirrors the Steyerberg (2009) framework:
+
+$$\underbrace{\text{Q.1--4}}_{\textbf{Describe \& Prepare}} \;\rightarrow\; \underbrace{\text{Q.5}}_{\textbf{Model}} \;\rightarrow\; \underbrace{\text{Q.6--7}}_{\textbf{Calibrate}} \;\rightarrow\; \underbrace{\text{Q.8}}_{\textbf{Discriminate}} \;\rightarrow\; \underbrace{\text{Q.9}}_{\textbf{Validate}} \;\rightarrow\; \underbrace{\text{Q.10}}_{\textbf{Decide}}$$
+
+Each step answers a progressively deeper question:
+
+| Step | Question | Tools | Course Reference |
+|:-----|:---------|:------|:-----------------|
+| Q.1--2 | What is the survival and censoring landscape? | Kaplan-Meier, reverse KM | Slides 3--4 |
+| Q.3--4 | How to handle censoring at the landmark? | Sample restriction | Slides 3 (censoring bias) |
+| Q.5 | What are patient-specific predicted risks? | Cox PH model, Breslow estimator | Slides 5 |
+| Q.6--7 | Is the prediction accurate? | Calibration plot, Brier Score | Slides 6 (calibration) |
+| Q.8 | Is the prediction consistent in ranks? | ROC curve, AUC, Youden index | Slides 6 (discrimination) |
+| Q.9 | Is the accuracy honest? | Bootstrap, IPCW | Slides 6 (validation), Gerds \& Schumacher (2006) |
+| Q.10 | Is the prediction clinically useful? | Decision curve analysis, Net Benefit | Slides 6 (clinical impact), Vickers \& Elkin (2006) |
+
+## Key Takeaways
+
+**1. Censoring is the defining challenge of survival-based risk prediction.** Every performance metric must either be computed on a sample where the outcome is fully observed (restricted sample approach) or be adjusted for censoring (IPCW approach). Ignoring censoring leads to biased estimates.
+
+**2. Calibration and discrimination are complementary, not interchangeable.** A model needs both to be clinically useful. The Brier Score is the only single indicator that captures both, through its decomposition into $BrS^{sc}$ (related to discrimination) and $\Delta$ (miscalibration).
+
+**3. Apparent performance is always optimistic.** Bootstrap internal validation is mandatory before drawing conclusions about model quality. The difference between apparent and corrected performance quantifies overfitting.
+
+**4. AUC is necessary but not sufficient for clinical utility.** A model with excellent AUC can harm patients if poorly calibrated. Decision curve analysis is the only framework that integrates discrimination, calibration, and the cost-benefit trade-off into a single, clinically interpretable evaluation.
+
+**5. The value of additional biomarkers must be proven at every level.** Adding creatinine and azotemia to a clinical model may improve AUC (discrimination), but this improvement only matters if it translates into better calibration, survives bootstrap correction, and produces higher net benefit across a clinically relevant range of thresholds. Only when all these conditions are met can we confidently recommend the enhanced model for clinical use.
