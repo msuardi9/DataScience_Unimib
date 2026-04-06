@@ -1,0 +1,1035 @@
+---
+title: "Lab 4 - Competing Risks and Multistate Models"
+author: "Matteo Suardi"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: false
+  html_document:
+    toc: true
+    toc_depth: '1'
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+\newpage 
+
+# Exercise 1 — Competing Risks in COVID-19 ICU Patients
+
+## Clinical context
+
+We analyse data from patients admitted to the ICU of a hospital in northern Italy during the first month of the COVID-19 pandemic. All patients were intubated; some received **Remdesivir** (an antiviral drug) in addition to standard of care. The goal is to study the impact of treatment on the time-to-event outcomes **extubation** (event = 1) and **death in ICU** (event = 2), which act as **competing risks**: the occurrence of one precludes the observation of the other.
+
+## Theoretical background
+
+In a competing risks framework, we observe a failure time $T$ and an event type indicator $\varepsilon \in \{1, 2\}$. The key quantities introduced in the course are:
+
+- **Cause-specific hazard** for event $k$:
+
+$$
+\lambda_k(t) = \lim_{\Delta t \to 0}
+  \frac{\Pr\{t < T \le t + \Delta t,\; \varepsilon = k \mid T > t\}}{\Delta t}
+$$
+
+  This represents the instantaneous rate ("velocity") of event $k$ among subjects still free from **any** event at time $t$.
+
+- **Crude (cumulative) incidence function** (CIF) for event $k$:
+
+$$
+F_k(t) = \Pr\{T \le t,\; \varepsilon = k\}
+$$
+
+  The CIF gives the probability of having experienced event $k$ by time $t$, **accounting for the fact that the competing event may occur first**.
+  It is estimated by the **Aalen–Johansen** estimator:
+  
+$$
+\hat{F}_k^{AJ}(t) = \sum_{t_{(j)} \le t}
+  \hat{S}_{KM}(t_{(j-1)}) \;\frac{d_{jk}}{n_j}
+$$
+
+  where $\hat{S}_{KM}(t_{(j-1)})$ is the Kaplan–Meier estimate of the event-free survival (free from **all** events) just before $t_{(j)}$, $d_{jk}$ is the number of type-$k$ events at $t_{(j)}$, and $n_j$ is the number at risk.
+
+- **Overall survival** (proportion still in the initial state):
+
+$$
+S(t) = \Pr\{T > t\} = 1 - F_1(t) - F_2(t)
+$$
+
+## Data loading and packages
+
+```{r}
+library(survival)
+library(prodlim)
+library(cmprsk)
+
+rdv <- read.table("remdesivir.txt", header = TRUE, row.names = NULL)
+
+str(rdv)
+head(rdv)
+```
+
+The dataset contains `r nrow(rdv)` patients with four variables:
+
+- `time`: days from intubation to event or censoring
+- `event`: 0 = censored, 1 = extubation, 2 = death in ICU
+- `treatment`: 1 = Remdesivir, 0 = standard of care
+- `id`: patient identifier
+
+\newpage
+
+## Question 1 — Crude incidence functions and ICU occupancy
+
+*Estimate the crude incidence functions of estubation and death in ICU for the two treatment groups. Estimate also the proportion of patients still remaining in ICU over time.*
+
+### Theory
+
+The `prodlim` package fits the **Aalen–Johansen** estimator directly via the `Hist()` interface, which recognises multi-state event indicators automatically.
+When we call `prodlim(Hist(time, event) ~ treatment)`, the function computes $\hat{F}_1^{AJ}(t)$ and $\hat{F}_2^{AJ}(t)$ (crude incidences of extubation and death) stratified by treatment group. From these, the proportion of patients **still in ICU** at time $t$ is simply:
+
+$$
+\hat{S}(t) = 1 - \hat{F}_1^{AJ}(t) - \hat{F}_2^{AJ}(t)
+$$
+
+Alternatively, this overall survival can be estimated with a standard Kaplan–Meier by treating the composite end-point (any event vs censoring) as a single binary outcome, i.e. defining the event indicator as $\mathbb{1}(\text{event} > 0)$.
+
+### Crude incidence of extubation and death
+
+```{r q1-cif, fig.width=12, fig.height=6}
+crFit <- prodlim(Hist(time, event) ~ treatment, data = rdv)
+summary(crFit)
+
+par(mar = c(4, 2, 3, 1), mfrow = c(1, 2))
+
+# Cause 1: Extubation
+plot(crFit, cause = 1,
+     xlab = "Time since intubation (days)", xlim = c(0, 30),
+     legend.x = "topleft",
+     legend.legend = c("no RDV", "RDV"),
+     atrisk.title = "",
+     atrisk.labels = c("no RDV", "RDV"))
+mtext("Extubation", side = 3, at = 14, cex = 2, line = 1)
+
+# Cause 2: Death in ICU
+plot(crFit, cause = 2,
+     xlab = "Time since intubation (days)", xlim = c(0, 30),
+     legend.x = "topleft",
+     legend.legend = c("no RDV", "RDV"),
+     atrisk.title = "",
+     atrisk.labels = c("no RDV", "RDV"))
+mtext("Death in ICU", side = 3, at = 14, cex = 2, line = 1)
+```
+
+The left panel shows $\hat{F}_1^{AJ}(t)$, the estimated probability of having been extubated (event of interest, `cause = 1`) by day $t$. The right panel shows $\hat{F}_2^{AJ}(t)$, the estimated probability of death in the intensive care unit (competing event, `cause = 2`) by day $t$.
+
+Both cumulative incidence curves (CIF) are stratified by treatment (yellow line for patients treated with RDV, black line for patients without RDV). Notice that each cumulative incidence function is **bounded above** by a value less than 1. This is an expected behavior in the presence of competing risks, because a portion of the total probability "mass" is absorbed by the occurrence of the competing event. Formally, the Aalen-Johansen estimator for the cumulative incidence of cause $k$ is given by:
+
+$$\hat{F}_k^{AJ}(t)=\int_0^t\hat{S}(u-)d\hat{\Lambda}_k(u)$$
+
+Contextualizing with the provided output data, we can accurately quantify the treatment effect at 30 days since intubation ($t = 30$):
+
+* **Extubation (Cause 1):** Patients treated with Remdesivir (RDV) show a clear clinical advantage. The cumulative probability of extubation at 30 days is estimated at **72.7%** ($\hat{F}_1^{AJ}(30)=0.7273$, 95% CI: $0.575-0.879$) in the RDV group, compared to **50.5%** ($\hat{F}_1^{AJ}(30)=0.5047$, 95% CI: $0.393-0.617$) in the control group (no RDV).
+* **Death in ICU (Cause 2):** The treatment is associated with a lower incidence of the fatal competing event. The cumulative probability of death in the ICU at 30 days is notably lower in the RDV group, standing at **12.1%** ($\hat{F}_2^{AJ}(30)=0.1212$), versus **29.5%** ($\hat{F}_2^{AJ}(30)=0.2948$) observed in patients who did not receive the drug.
+
+### Proportion of patients still in ICU
+
+```{r q1-icu, fig.width=8, fig.height=6}
+par(mar = c(4, 2, 3, 1), mfrow = c(1, 1))
+
+fit <- prodlim(Hist(time, event > 0) ~ treatment, data = rdv)
+summary(fit)
+
+plot(fit,
+     xlab = "Time since intubation (days)", xlim = c(0, 30),
+     legend.x = "topright",
+     legend.legend = c("no RDV", "RDV"),
+     atrisk.title = "",
+     atrisk.labels = c("no RDV", "RDV"))
+mtext("Still in ICU", side = 3, at = 14, cex = 2, line = 1)
+```
+
+This graph illustrates the estimated survival function $\hat{S}(t) = 1 - \hat{F}_1(t) - \hat{F}_2(t)$, which is the estimated probability of a patient still being in the Intensive Care Unit (ICU)—meaning neither extubated nor deceased—at time $t$.
+
+The expression `event > 0` used for this model collapses both competing events (extubation and death) into a single composite endpoint. This way, the analysis reverts to a classic survival approach, allowing the application of the standard Kaplan-Meier estimator, whose general formula is:
+
+$$\hat{S}(t) = \prod_{t_i \le t} \left( 1 - \frac{d_i}{n_i} \right)$$
+
+Observing the curves and statistical data, it is evident that the group treated with Remdesivir (RDV, yellow line) tends to leave the intensive care unit faster compared to the control group (no RDV, black line). This lower probability of remaining in the ICU over time is mainly driven by the higher extubation rate (as highlighted in the previous cumulative incidence functions).
+
+Contextualizing with the exact data extracted from the output:
+
+* At day 15 ($t = 15$), the estimated probability of still being in the ICU is **42.4%** ($\hat{S}(15) = 0.4242$) in the RDV group, compared to **46.9%** ($\hat{S}(15) = 0.4688$) in the untreated control group.
+* This gap remains evident at 30 days since intubation ($t = 30$): the estimated probability of staying in intensive care drops to **15.2%** ($\hat{S}(30) = 0.1515$, 95% CI: $0.029 - 0.274$) for patients treated with RDV, while for patients in the control group it remains higher, standing at **20.1%** ($\hat{S}(30) = 0.2006$, 95% CI: $0.110 - 0.291$).
+
+\newpage 
+
+## Question 2 — Gray test for comparing crude incidences
+
+*Compare the crude incidence curves under the two treatments by the Gray test.*
+
+### Why not the log-rank test?
+
+markdown## Question 2 — Gray test for comparing crude incidences
+
+### Why not the log-rank test?
+
+A crucial point from the course: we **cannot** test equality of crude incidences through cause-specific hazards, because each crude incidence depends on **both** cause-specific hazards simultaneously:
+
+$$
+F_k(t) = \int_0^t S(u^-) \cdot \lambda_k(u)\, du
+$$
+
+Even if $\lambda_{A1}(t) = \lambda_{B1}(t)$ for all $t$, the crude incidences $F_{A1}(t)$ and $F_{B1}(t)$ may still differ if the competing hazard $\lambda_2$ differs between groups (since $S(u)$ depends on $\lambda_1 + \lambda_2$).
+
+### The sub-distribution hazard and the Gray test
+
+To obtain a one-to-one mapping between a hazard and the crude incidence, Gray (1988) introduced the **sub-distribution hazard**:
+
+$$
+\lambda_k^*(t) = \lim_{\Delta t \to 0}
+  \frac{\Pr\{t < T \le t + \Delta t,\; \varepsilon = k
+        \mid T > t \;\cup\; (T \le t,\; \varepsilon \ne k)\}}{\Delta t}
+$$
+
+The key difference from the cause-specific hazard is the risk set: subjects who have already experienced the **competing** event are kept "artificially" at risk — they will never experience event $k$, but they remain in the denominator. This ensures a direct link:
+
+$$
+F_k(t) = 1 - \exp\!\left\{-\int_0^t \lambda_k^*(u)\,du\right\}
+$$
+
+The **Gray test** then tests:
+
+$$
+H_0: F_{A,k}(t) = F_{B,k}(t) \;\;\forall\, t
+\qquad\Longleftrightarrow\qquad
+H_0: \lambda_{A,k}^*(t) = \lambda_{B,k}^*(t) \;\;\forall\, t
+$$
+
+It is analogous to the log-rank test but uses the sub-distribution hazard framework. The function `cuminc()` from the `cmprsk` package computes the test for each cause simultaneously.
+
+```{r q2-gray}
+ci <- with(rdv, cuminc(ftime = time, fstatus = event, group = treatment))
+
+ci$Tests
+```
+
+The output table reports the results of Gray's test, providing the test statistic and the $p$-value to formally evaluate whether the cumulative incidence of each event type differs between the treatment groups (Remdesivir vs. no RDV). 
+
+* **Event 1 (Extubation):** This tests whether the crude incidence of extubation differs between the Remdesivir and control groups. The analysis yields a statistically significant result ($\chi^2 = 5.742$, $p = 0.0166$). Because the $p$-value is below the conventional $\alpha = 0.05$ threshold, we can conclude that the sub-distribution hazards—and therefore the cumulative incidence curves—for extubation differ significantly between the treatments, favoring the RDV group.
+* **Event 2 (Death in ICU):** This tests whether the crude incidence of the competing fatal event differs between the groups. The test yields a statistic of $\chi^2 = 3.645$ with a $p$-value of $0.0562$. While this indicates a strong trend towards a lower probability of death in the Remdesivir group, it falls just short of strict statistical significance at the $5\%$ level.
+
+**Methodological note:** It is important to emphasize that Gray's test is **not** the same as performing two separate log-rank tests on the cause-specific hazards. Instead, it directly targets the quantity of primary clinical interest: the probability of a specific event occurring over time while properly accounting for the presence of the competing risk.
+
+\newpage
+
+## Question 3 — Cumulative cause-specific hazards
+
+*Estimate the cumulative cause-specific hazards by treatment. Estimate the cumulative hazard of the composite end-point (Estubation or death in ICU).*
+
+### Theory
+
+As seen in the course, the **cause-specific hazard** for event $k$ is:
+
+$$
+\lambda_k(t) = \lim_{\Delta t \to 0}
+  \frac{\Pr\{t < T \le t + \Delta t,\; \varepsilon = k \mid T > t\}}{\Delta t}
+$$
+
+The risk set includes only subjects free from **all** events (both extubation and death). This means that to estimate $\lambda_1(t)$ we treat competing events (event 2) as **censorings**, and vice versa.
+
+The **Aalen–Nelson estimator** of the cumulative cause-specific hazard is:
+
+$$
+\hat{\Lambda}_k^{AN}(t) = \sum_{t_{(j)} \le t} \frac{d_{jk}}{n_j}
+$$
+
+where $d_{jk}$ is the number of type-$k$ events at time $t_{(j)}$ and $n_j$ is the number at risk (free from both events and uncensored). This is identical to the standard Nelson–Aalen estimator, but applied to a single cause while censoring the other.
+
+An important property is the **additivity** of cause-specific hazards:
+
+$$
+\Lambda(t) = \Lambda_1(t) + \Lambda_2(t)
+$$
+
+where $\Lambda(t)$ is the cumulative hazard of the **composite end-point** (any event). This means the overall "velocity of leaving ICU" is the sum of the velocities of extubation and death.
+
+In R, the trick is to use `survfit(Surv(time, event == k) ~ ...)`: by coding the event indicator as `event == k`, the competing event is automatically treated as censored. We then manually accumulate $d_j / n_j$ from the fitted object.
+
+### Cumulative cause-specific hazard: Extubation
+
+```{r q3-est, fig.width=12, fig.height=6}
+fit.est <- survfit(Surv(time, event == 1) ~ treatment, data = rdv)
+summary(fit.est)
+
+na.haz.est0 <- cumsum(fit.est["treatment=0"]$n.event /
+                       fit.est["treatment=0"]$n.risk)
+na.haz.est1 <- cumsum(fit.est["treatment=1"]$n.event /
+                       fit.est["treatment=1"]$n.risk)
+
+par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
+
+plot(c(0, fit.est["treatment=0"]$time), c(0, na.haz.est0),
+     xlab = "Time (days)", ylab = "Cumulative cause-specific hazard",
+     type = "s", lwd = 3, xlim = c(0, 30), ylim = c(0, 1.5))
+lines(c(0, fit.est["treatment=1"]$time), c(0, na.haz.est1),
+      type = "s", lwd = 3, col = "goldenrod1")
+legend("top", c("No RDV", "RDV"), lwd = 3,
+       col = c("black", "goldenrod1"), bty = "n")
+mtext("Extubation", side = 3, at = 14, cex = 2, line = 1)
+```
+
+### Cumulative cause-specific hazard: Death in ICU
+
+```{r q3-death}
+fit.d <- survfit(Surv(time, event == 2) ~ treatment, data = rdv)
+summary(fit.d)
+
+na.haz.d0 <- cumsum(fit.d["treatment=0"]$n.event /
+                     fit.d["treatment=0"]$n.risk)
+na.haz.d1 <- cumsum(fit.d["treatment=1"]$n.event /
+                     fit.d["treatment=1"]$n.risk)
+
+plot(c(0, fit.d["treatment=0"]$time), c(0, na.haz.d0),
+     xlab = "Time (days)", ylab = "Cumulative cause-specific hazard",
+     type = "s", lwd = 3, xlim = c(0, 30), ylim = c(0, 1.5))
+lines(c(0, fit.d["treatment=1"]$time), c(0, na.haz.d1),
+      type = "s", lwd = 3, col = "goldenrod1")
+legend("top", c("No RDV", "RDV"), lwd = 3,
+       col = c("black", "goldenrod1"), bty = "n")
+mtext("Death in ICU", side = 3, at = 14, cex = 2, line = 1)
+```
+
+The two panels above illustrate the Nelson-Aalen estimators for the cumulative cause-specific hazards. The Nelson-Aalen estimator for cause $k$ is mathematically defined as the sum of the cause-specific hazard contributions over time:
+
+$$\hat{\Lambda}_k^{NA}(t) = \sum_{t_i \le t} \frac{d_{ki}}{n_i}$$
+
+Where $d_{ki}$ is the number of events of type $k$ at time $t_i$, and $n_i$ is the number of patients still at risk (still in the ICU) at that time.
+
+* **Extubation (Event 1):** This plot shows $\hat{\Lambda}_1^{NA}(t)$. A steeper curve indicates a higher instantaneous rate of extubation among patients who are still in the ICU. The data confirms that patients treated with Remdesivir (RDV) are extubated at a faster rate. Looking at the cause-specific survival output (which censors deaths), only **19.5%** of RDV patients remain "at risk" of extubation by day 30 ($\hat{S}_1(30) = 0.1945$), compared to **33.2%** of the untreated patients by day 29 ($\hat{S}_1(29) = 0.332$). This rapid drop in the survival function corresponds directly to the higher cumulative hazard (yellow line) seen in the plot.
+* **Death in ICU (Event 2):** This plot displays $\hat{\Lambda}_2^{NA}(t)$, the rate at which patients still in the ICU are dying. The control group (No RDV, black line) exhibits a higher cumulative cause-specific hazard for death compared to the treated group. By day 31, the cause-specific survival (censoring extubations) drops to **55.7%** for the control group, whereas it remains at **63.8%** for the RDV group.
+
+**Crucial methodological caveat:** It is important to note that if one group has a higher cause-specific hazard for extubation, it does not automatically mean it has a lower *crude incidence* of death. This is because removing patients faster via extubation also rapidly shrinks the risk set ($n_i$) for death. However, in this specific cohort, the RDV treatment appears to be beneficial on both fronts: increasing the rate of discharge/extubation while simultaneously keeping the cause-specific hazard of death low.
+
+### Cumulative hazard of the composite end-point
+
+```{r q3-composite, fig.width=8, fig.height=6}
+fit.tot <- survfit(Surv(time, event > 0) ~ treatment, data = rdv)
+summary(fit.tot)
+
+na.haz.tot0 <- cumsum(fit.tot["treatment=0"]$n.event /
+                       fit.tot["treatment=0"]$n.risk)
+na.haz.tot1 <- cumsum(fit.tot["treatment=1"]$n.event /
+                       fit.tot["treatment=1"]$n.risk)
+
+par(mfrow = c(1, 1), mar = c(4, 4, 3, 1))
+
+plot(c(0, fit.tot["treatment=0"]$time), c(0, na.haz.tot0),
+     xlab = "Time (days)", ylab = "Cumulative hazard",
+     type = "s", lwd = 3, xlim = c(0, 30), ylim = c(0, 2))
+lines(c(0, fit.tot["treatment=1"]$time), c(0, na.haz.tot1),
+      type = "s", lwd = 3, col = "goldenrod1")
+legend("top", c("No RDV", "RDV"), lwd = 3,
+       col = c("black", "goldenrod1"), bty = "n")
+mtext("Composite end-point", side = 3, at = 14, cex = 2, line = 1)
+```
+
+This plot displays the overall cumulative hazard, denoted as $\hat{\Lambda}(t) = \hat{\Lambda}_1(t) + \hat{\Lambda}_2(t)$. It represents the total "velocity" at which patients are exiting the ICU, regardless of the specific reason (whether by successful extubation or death). 
+
+By the additivity property of cause-specific hazards, this composite measure is exactly what the `survfit` function computes when we collapse the competing risks into a single outcome using the indicator `event > 0`. The overall cumulative hazard is mathematically linked to the overall survival function $\hat{S}(t)$ (the probability of still being in the ICU) via the relation:
+
+$$\hat{\Lambda}(t) = -\ln(\hat{S}(t))$$
+
+A steeper curve in this plot indicates a faster overall rate of leaving the intensive care unit. Contextualizing this with the statistical output, we can trace the clinical trajectory of the two cohorts:
+
+* **Day 15:** The Remdesivir (RDV) group begins to demonstrate a faster overall exit velocity. The probability of remaining in the ICU drops to **42.4%** ($\hat{S}(15) = 0.4242$), which translates to an overall cumulative hazard of approximately **0.86** (visible on the yellow curve). In contrast, the control group has a survival of **46.9%** ($\hat{S}(15) = 0.469$) and a slightly lower cumulative hazard of **0.76** (black curve).
+* **Day 31:** Toward the end of the observation period, the cumulative hazard for the RDV group sharply diverges upward. By day 31, only **9.1%** of the RDV patients are still in the ICU ($\hat{S}(31) = 0.0909$), compared to twice as many (**18.1%**) in the control arm ($\hat{S}(31) = 0.181$).
+
+**Conclusion:** When combined with the previous cause-specific analyses, this composite endpoint confirms that the faster overall "exit velocity" in the RDV arm is a highly positive clinical outcome, as it is driven by an accelerated rate of successful extubations rather than an increased mortality rate.
+
+\newpage
+
+## Question 4 — Aalen-Johansen vs Kaplan-Meier: a common error
+
+*Compare the Aalen-Johansen estimate of estubation and death in ICU with the Kaplan-Meier estimate (where additional censoring on the competing event is added).*
+
+### Theory
+
+As highlighted in the course slides ("A COMMON ERROR"), a frequent mistake in competing risks analysis is to estimate the crude incidence of event $k$ using the **Kaplan-Meier complement** $1 - \hat{S}_{KM}(t)$, where competing events are simply treated as censorings.
+
+Recall the **Aalen–Johansen** estimator of the crude incidence:
+
+$$
+\hat{F}_k^{AJ}(t) = \sum_{t_{(j)} \le t}
+  \hat{S}_{KM}(t_{(j-1)}) \;\frac{d_{jk}}{n_j}
+$$
+
+Here $\hat{S}_{KM}(t_{(j-1)})$ is the overall event-free survival (free from **all** events), so each "jump" in the CIF is weighted by the actual proportion of patients still at risk for anything.
+
+The naive **Kaplan-Meier** approach instead fits a standard KM treating the competing event as an additional censoring:
+
+$$
+\hat{F}_k^{KM}(t) = 1 - \hat{S}_{KM}^{(k)}(t)
+  = 1 - \prod_{t_{(j)} \le t} \left(1 - \frac{d_{jk}}{n_j^{(k)}}\right)
+$$
+
+where now the risk set $n_j^{(k)}$ is **reduced** by subjects who previously experienced the competing event (they are "censored out").
+
+**Why does KM overestimate?** By removing subjects who had the competing event from the risk set, the KM estimator implicitly assumes they could still experience event $k$ — i.e., it assumes **independent censoring**.
+But competing events are not independent censorings: a patient who has died **cannot** be extubated. The KM thus inflates the denominator's reduction, producing a larger cumulative incidence than the true probability $F_k(t) = \Pr\{T \le t,\; \varepsilon = k\}$.
+
+The consequence is:
+
+$$
+\hat{F}_k^{KM}(t) \;\ge\; \hat{F}_k^{AJ}(t)
+$$
+
+and the sum of the KM-based "crude incidences" for all causes can exceed 1, which is clearly impossible for probabilities. The Aalen-Johansen estimator does not suffer from this problem, and the stacked CIFs always sum to at most 1.
+
+```{r q4-aj-vs-km, fig.width=12, fig.height=6}
+par(mar = c(4, 2, 3, 1), mfrow = c(1, 2))
+
+crFit <- prodlim(Hist(time, event) ~ treatment, data = rdv)
+
+# Extubation (cause 1)
+plot(crFit, cause = 1,
+     xlab = "Time since intubation (days)", xlim = c(0, 30),
+     confint = FALSE,
+     legend.x = "topleft",
+     legend.legend = c("no RDV (AJ)", "RDV (AJ)"),
+     atrisk.title = "", atrisk.labels = c("no RDV", "RDV"))
+
+kmFit1 <- prodlim(Hist(time, event == 1) ~ treatment, data = rdv)
+plot(kmFit1, type = "cuminc", add = TRUE, lty = 3, confint = FALSE)
+mtext("AJ (solid) vs KM (dashed) — Extubation",
+      side = 3, at = 12, cex = 1, line = 1)
+
+# Death in ICU (cause 2)
+plot(crFit, cause = 2,
+     xlab = "Time since intubation (days)", xlim = c(0, 30),
+     confint = FALSE,
+     legend.x = "topleft",
+     legend.legend = c("no RDV (AJ)", "RDV (AJ)"),
+     atrisk.title = "", atrisk.labels = c("no RDV", "RDV"))
+
+kmFit2 <- prodlim(Hist(time, event == 2) ~ treatment, data = rdv)
+plot(kmFit2, type = "cuminc", add = TRUE, lty = 3, confint = FALSE)
+mtext("AJ (solid) vs KM (dashed) — Death in ICU",
+      side = 3, at = 12, cex = 1, line = 1)
+```
+
+The two panels visually compare the correct Aalen-Johansen (AJ) estimates of cumulative incidence (solid lines) against the naive Kaplan-Meier (KM) approach (dashed lines) for both extubation (left panel) and death in the ICU (right panel).
+
+In both panels, the dashed KM curves consistently lie **above** the solid AJ curves. This visual gap confirms a fundamental theoretical result: computing the cumulative incidence using the naive approach systematically **overestimates** the true probability of the event. 
+
+Mathematically, the naive approach calculates the incidence as:
+
+$$\hat{F}_k^{Naive}(t) = 1 - \hat{S}_k^{KM}(t)$$
+
+This upward bias occurs because the standard Kaplan-Meier method treats competing events (e.g., dying before being extubated) as independent right-censoring. It effectively assumes that a patient who died was merely "lost to follow-up" and would have eventually experienced the event of interest if they had lived longer. This violates the core reality of competing risks, where the competing event permanently removes the patient from the risk set.
+
+As observed in the plots, the overestimation gap between the two estimators widens as time progresses and more competing events accumulate. Therefore, the Aalen-Johansen estimator:
+
+$$\hat{F}_k^{AJ}(t) = \int_0^t \hat{S}^{Overall}(u-) d\hat{\Lambda}_k(u)$$
+
+is the statistically rigorous and correct non-parametric estimator for the cumulative incidence function $F_k(t)$ in the presence of competing risks. It explicitly accounts for the fact that patients experiencing the competing event can no longer experience the event of interest, and it should **always be preferred** over the naive $1 - KM$ method.
+
+\newpage
+
+## Exercise 1 — Recap and Roadmap
+
+### Clinical setting
+
+We studied `r nrow(rdv)` COVID-19 patients intubated in ICU, comparing Remdesivir ($n_{RDV}$) vs standard of care ($n_{ctrl}$). Two mutually exclusive outcomes compete: **extubation** (event 1, favourable) and **death in ICU** (event 2, unfavourable). A patient who is extubated can no longer die in ICU as a first event, and vice versa — this is the defining feature of a **competing risks** problem.
+
+### Conceptual roadmap
+
+The exercise walked through four complementary layers of competing risks analysis. Each answers a different question:
+
+**Q1 — What is the probability of each event over time?**
+
+We estimated the **crude incidence functions** (CIF) via the Aalen–Johansen estimator:
+
+$$
+\hat{F}_k^{AJ}(t) = \sum_{t_{(j)} \le t}
+  \hat{S}_{KM}(t_{(j-1)}) \;\frac{d_{jk}}{n_j}
+$$
+
+These give $\Pr\{T \le t,\;\varepsilon = k\}$, i.e. the actual probability of event $k$ by time $t$ in a world where the competing event exists.
+We also estimated the proportion still in ICU as $\hat{S}(t) = 1 - \hat{F}_1(t) - \hat{F}_2(t)$.
+
+**Q2 — Are the CIFs different between treatments?**
+
+We used the **Gray test**, which tests equality of CIFs through the **sub-distribution hazard**:
+
+$$
+H_0:\; F_{A,k}(t) = F_{B,k}(t) \;\forall\,t
+\qquad\Longleftrightarrow\qquad
+H_0:\; \lambda_{A,k}^*(t) = \lambda_{B,k}^*(t) \;\forall\,t
+$$
+
+A standard log-rank test on cause-specific hazards cannot be used for this purpose, because each CIF depends on **both** cause-specific hazards: $F_k(t) = \int_0^t S(u^-)\,\lambda_k(u)\,du$.
+
+**Q3 — What is the instantaneous rate of each event among patients still in ICU?**
+
+We estimated the **cumulative cause-specific hazards** via Aalen–Nelson:
+
+$$
+\hat{\Lambda}_k^{AN}(t) = \sum_{t_{(j)} \le t} \frac{d_{jk}}{n_j}
+$$
+where competing events are treated as censorings. The composite end-point hazard satisfies $\Lambda(t) = \Lambda_1(t) + \Lambda_2(t)$.
+
+**Q4 — Why not just use 1 - KM?**
+
+We compared the correct Aalen–Johansen CIF with the naive $1 - \hat{S}_{KM}^{(k)}(t)$ obtained by censoring competing events.
+The KM approach **overestimates** the crude incidence because it violates independent censoring: subjects who experienced the competing event are removed from the risk set as if they could still develop event $k$, which they cannot.
+
+### Key take-home messages
+
+1. **Two types of hazard, two different questions.** The cause-specific hazard $\lambda_k(t)$ describes the rate among event-free subjects (aetiological question). The sub-distribution hazard $\lambda_k^*(t)$ maps one-to-one to the CIF (prognostic/public-health question).
+
+2. **CIF $\ne$ 1 - KM.** Using the Kaplan–Meier complement to estimate $F_k(t)$ is a well-documented error that leads to upward bias. Always use the Aalen–Johansen estimator.
+
+3. **Testing must match the target.** To compare CIFs, use the Gray test (on $\lambda^*$), not the log-rank (on $\lambda$). Equal cause-specific hazards do **not** imply equal crude incidences.
+
+4. **Additivity.** The CIFs are complementary: $F_1(t) + F_2(t) + S(t) = 1$, ensuring a coherent partition of patients across states at every time point.
+
+\newpage
+
+# Exercise 2 — Multistate Models (Illness-Death)
+
+## Clinical context
+
+We now move from competing risks to a more general **multistate** framework.
+The dataset `ebmt3` (from the `mstate` package) contains data from the European Society for Blood and Marrow Transplantation (EBMT): 2204 leukaemia patients who received bone marrow transplantation between 1995 and 1998.
+After transplant, patients were followed until **platelet recovery** (PR), **relapse or death** (R/D), or censoring.
+
+## Theoretical background: the illness-death model
+
+As presented in the course, competing risks are a special case of multistate models where all transitions originate from a single initial state. Here we generalise to the **illness-death model**, which has:
+
+- **State 0 — Transplant (Tx):** initial state, all patients start here.
+- **State 1 — Platelet Recovery (PR):** intermediate (transient) state.
+- **State 2 — Relapse or Death (R/D):** absorbing state (no exit).
+
+Three **transition hazards** govern the dynamics:
+
+$$
+\lambda_{01}(t):\; \text{Tx} \to \text{PR}
+\qquad
+\lambda_{02}(t):\; \text{Tx} \to \text{R/D}
+\qquad
+\lambda_{12}(t):\; \text{PR} \to \text{R/D}
+$$
+
+At any time $t$, a patient can be in exactly one of three conditions:
+
+1. Alive with no relapse and no platelet recovery (state 0)
+2. Alive with platelet recovery but no relapse (state 1)
+3. Relapse or death — with or without prior PR (state 2, absorbing)
+
+Note how the competing risks setting of Exercise 1 is a special case: if we remove the $\lambda_{12}$ transition (no movement after the intermediate state), we recover the standard two-cause competing risks framework. The multistate model adds the possibility that patients who reach state 1 can subsequently move to state 2.
+
+The key quantities we will estimate are:
+
+- **Cumulative transition hazards** $\Lambda_{rs}(t) = \int_0^t \lambda_{rs}(u)\,du$ for each allowed transition $r \to s$.
+- **State occupation probabilities** $P_j(t) = \Pr\{\text{being in state } j \text{ at time } t\}$, which partition the population at every $t$:
+  
+$$
+P_0(t) + P_1(t) + P_2(t) = 1 \qquad \forall\, t
+$$
+
+## Data loading and inspection
+
+```{r ex2-setup, message=FALSE, warning=FALSE}
+library(mstate)
+
+data(ebmt3)
+
+str(ebmt3)
+head(ebmt3)
+```
+
+The dataset is structured in **wide format**, meaning that all longitudinal data for a single patient is captured within a single row (identified by the `id` column). The dataset records multiple critical clinical milestones for each patient, specifically focusing on two distinct survival processes:
+
+* **Platelet recovery:** Recorded via `prtime` (time from transplant to platelet recovery, in days) and `prstat` (the event indicator, where `1` indicates successful recovery). For example, patient 1 recovered their platelets at 23 days.
+* **Relapse-free survival (RFS):** Recorded via `rfstime` (time to relapse, death, or last follow-up) and `rfsstat` (the event indicator, where `1` indicates the event occurred and `0` indicates right-censoring). For instance, patient 1 was censored at 744 days, whereas patient 2 experienced an RFS event at 360 days.
+
+Alongside these time-to-event outcomes, the dataset includes baseline clinical and demographic covariates: disease subtype (`dissub`: CML, AML, ALL), patient age category (`age`), donor-recipient gender match (`drmatch`), and T-cell depletion status (`tcd`).
+
+**Methodological implications of the wide format:**
+
+While this wide format is perfectly suited for analyzing these endpoints independently (e.g., calculating a Kaplan-Meier curve for time to platelet recovery, or running a standard Cox proportional hazards model for RFS based solely on baseline covariates like `age` or `dissub`), it poses a strict limitation for more complex analyses. 
+
+If the clinical goal is to evaluate whether achieving *platelet recovery* influences *relapse-free survival*, we cannot simply include `prtime` or `prstat` as standard predictors in an RFS model. Because platelet recovery occurs after the start of follow-up (it is an intermediate event), doing so would introduce severe **immortal time bias**. 
+
+To properly model platelet recovery as a time-dependent covariate, or to evaluate the clinical trajectory using a Multi-State Model (e.g., Transplant $\rightarrow$ Platelet Recovery $\rightarrow$ Relapse/Death), this wide dataset must be transformed into a **long format** (counting process format, typically utilizing `tstart` and `tstop` intervals) using functions like `tmerge()` in the `survival` package.
+
+## Question 1 — Transition matrix
+
+*Build the transition matrix for the illness-death model with Transplant, PR and RelDeath states.*
+
+### Theory
+
+A multistate model is fully specified by its **transition matrix**, which encodes which transitions between states are allowed. For $K$ states, the transition matrix $\mathbf{T}$ is a $K \times K$ matrix where entry $T_{rs}$ contains the transition number if a direct move from state $r$ to state $s$ is allowed, and `NA` otherwise. Diagonal entries are always `NA` (no self-transitions).
+
+For our **illness-death model**  we have three states and three allowed transitions:
+
+$$
+\mathbf{T} =
+\begin{pmatrix}
+ & \text{Tx} & \text{PR} & \text{R/D} \\
+\text{Tx} & \cdot & 1 & 2 \\
+\text{PR} & \cdot & \cdot & 3 \\
+\text{R/D} & \cdot & \cdot & \cdot
+\end{pmatrix}
+$$
+
+Reading the matrix row by row:
+
+- **From Tx (state 0):** two exits are possible — transition 1 to PR ($\lambda_{01}$) and transition 2 to R/D ($\lambda_{02}$). This is the competing risks part of the model.
+- **From PR (state 1):** only one exit — transition 3 to R/D ($\lambda_{12}$). This is the additional transition that extends competing risks into a full illness-death model.
+- **From R/D (state 2):** no exits — this is the **absorbing** state.
+
+The `mstate` package provides `transMat()` to build this matrix. Its argument `x` is a list with one element per state: a vector of reachable states (using row indices), or `c()` for absorbing states.
+
+```{r q1-tmat}
+tmat <- transMat(
+  x = list(c(2, 3), c(3), c()),
+  names = c("Tx", "PR", "RelDeath")
+)
+
+tmat
+```
+
+The output matrix below defines the allowed transitions between the clinical states in our model:
+
+```text
+         to
+from       Tx PR RelDeath
+  Tx       NA  1        2
+  PR       NA NA        3
+  RelDeath NA NA       NA
+```
+
+\newpage
+
+## Question 2 — Time conversion and data reshaping
+
+*Transform time from days to years and reshape data from wide to long format.*
+
+### Theory
+
+The original `ebmt3` dataset is in **wide format**: one row per patient, with separate columns for each endpoint time and status. However, the `mstate` package needs data in **long (counting-process) format**, where each row represents a single **transition** that a patient is at risk for.
+
+For the illness-death model, a patient can contribute up to **three rows** in the long dataset (one per possible transition):
+
+| Row | Transition | `Tstart` | `Tstop` | `status` | Meaning |
+|:---:|:---:|:---:|:---:|:---:|:---|
+| 1 | Tx $\to$ PR | 0 | $\min(T_{PR}, T_{RD}, T_C)$ | 1 if PR observed | At risk for platelet recovery |
+| 2 | Tx $\to$ R/D | 0 | $\min(T_{PR}, T_{RD}, T_C)$ | 1 if R/D before PR | At risk for relapse/death from initial state |
+| 3 | PR $\to$ R/D | $T_{PR}$ | $T_{RD}$ or $T_C$ | 1 if R/D after PR | At risk for relapse/death **after** platelet recovery |
+
+Row 3 only exists for patients who actually reached PR (state 1). Patients who went directly from Tx to R/D or were censored before PR contribute only rows 1 and 2.
+
+This is the **counting process** representation: each interval $(T_{\text{start}},\, T_{\text{stop}}]$ defines the time window during which the patient is at risk for a specific transition. The `status` indicator tells whether the transition was actually observed at $T_{\text{stop}}$.
+
+The function `msprep()` from the `mstate` package automates this transformation, using the transition matrix `tmat` to determine which rows to generate for each patient.
+
+We also convert time from **days to years** (dividing by 365.25) for easier clinical interpretation, as follow-up spans several years.
+
+```{r q2-reshape}
+ebmt3$prtime <- ebmt3$prtime / 365.25
+ebmt3$rfstime <- ebmt3$rfstime / 365.25
+
+msbmt <- msprep(
+  time = c(NA, "prtime", "rfstime"),
+  status = c(NA, "prstat", "rfsstat"),
+  data = ebmt3,
+  trans = tmat
+)
+
+head(msbmt)
+```
+
+The output displays the dataset after it has been transformed from wide format into the **long format** (counting process format) required for multi-state modeling, resulting in an object of class `msdata`. 
+
+**Reading the output:** Each row now represents one specific patient-transition risk interval. The key columns are:
+* `id`: The patient identifier.
+* `from`, `to`: The origin and destination states of the possible transition.
+* `trans`: The transition number (`1`, `2`, or `3`, mapping directly to the `transMat` defined previously).
+* `Tstart`, `Tstop`: The at-risk interval $(T_{\text{start}}, T_{\text{stop}}]$, measured in years since the transplant.
+* `time`: The duration of the specific transition interval ($T_{\text{stop}} - T_{\text{start}}$).
+* `status`: `1` if the transition was observed (the event occurred), `0` if the interval was right-censored.
+
+We can perfectly trace the distinct clinical trajectories of the first two patients by reading their corresponding rows:
+
+* **Patient 1 (`id = 1`):** Started in State 1 (Transplant) at time 0. By year $0.063$ (approx. 23 days), they successfully achieved Platelet Recovery (Transition 1 shows `status = 1`), meaning they did *not* die or relapse before PR (Transition 2 shows `status = 0`). Consequently, a third row is generated: the patient enters the risk set for State 2 starting at $T_{\text{start}} = 0.063$. They remain in this state until year $2.037$, at which point they are right-censored for relapse/death (Transition 3 shows `status = 0`).
+* **Patient 2 (`id = 2`):** Similarly achieved Platelet Recovery at year $0.096$ (Transition 1 shows `status = 1`) and entered State 2 at $T_{\text{start}} = 0.096$. However, unlike Patient 1, Patient 2 subsequently experienced a relapse or death at year $0.986$, which is recorded as an observed event for Transition 3 (`status = 1`).
+
+**Methodological note on `msprep()`:**
+Note how the arguments passed to the `msprep()` function mirror the original wide-format structure. The argument `time = c(NA, "prtime", "rfstime")` dictates the timing logic: "no entry time for the initial state, platelet recovery time for State 2, and relapse-free survival time for State 3". The `NA` for the initial state reflects the fundamental assumption that all patients start in state Tx (State 1) exactly at time $t = 0$.
+
+\newpage
+
+## Question 3 — Cumulative transition hazards
+
+*Estimate and plot the cumulative transition hazards.*
+
+### Theory
+
+In a multistate model, each allowed transition $r \to s$ has its own **transition-specific hazard** $\lambda_{rs}(t)$, and we want to estimate the corresponding **cumulative transition hazard**:
+
+$$
+\Lambda_{rs}(t) = \int_0^t \lambda_{rs}(u)\,du
+$$
+
+The estimation strategy leverages the **stratified Cox model** seen in the course. In the long-format dataset each row belongs to exactly one transition, identified by the variable `trans`. We fit:
+
+$$
+\lambda_m(t) = \lambda_{0m}(t) \cdot \exp(\boldsymbol{\beta}' \mathbf{x})
+$$
+
+where $m = 1, 2, 3$ indexes the transition (stratum). By using `strata(trans)` we allow a **completely separate baseline hazard** for each transition — no proportional hazards assumption is needed across transitions.
+
+In our case we include **no covariates** (intercept-only model), so the model reduces to:
+
+$$
+\lambda_m(t) = \lambda_{0m}(t)
+$$
+
+and the Breslow estimator of the cumulative baseline hazard coincides with the **Aalen–Nelson** estimator applied to each transition separately:
+
+$$
+\hat{\Lambda}_{rs}^{AN}(t) = \sum_{t_{(j)} \le t} \frac{d_{j,rs}}{n_{j,rs}}
+$$
+
+where $d_{j,rs}$ counts the observed $r \to s$ transitions at time $t_{(j)}$ and $n_{j,rs}$ counts subjects at risk for that transition (i.e., currently in state $r$ and uncensored).
+
+The `mstate` workflow is:
+
+1. **`coxph()`** with `strata(trans)` — fits the stratified Cox model on the long data (Breslow method for ties).
+2. **`msfit()`** — extracts the estimated cumulative hazards $\hat{\Lambda}_{rs}(t)$ for each transition from the fitted Cox object.
+
+```{r q3-cumhaz, fig.width=8, fig.height=6}
+c1 <- coxph(
+  Surv(Tstart, Tstop, status) ~ strata(trans),
+  data   = msbmt,
+  method = "breslow"
+)
+
+msf1 <- msfit(c1, newdata = msbmt, trans = tmat)
+
+par(mfrow = c(1, 1), mar = c(4, 4, 2, 2))
+plot(msf1,
+     cols = rep(1, 3),            
+     lwd  = 2,
+     lty  = 1:3,          
+     xlab = "Years since transplant",
+     ylab = "Cumulative hazard",
+     legend.pos = c(3, 0.4),
+     ylim = c(0, 0.9))
+```
+
+The plot displays the non-parametric Nelson-Aalen estimates for the cumulative baseline hazards of the three transitions defined in our model. 
+
+| Line Style | Transition | Hazard Component | Clinical Reading |
+| :---: | :--- | :---: | :--- |
+| **Solid** | Tx $\to$ PR | $\hat{\Lambda}_{01}(t)$ | Cumulative rate of platelet recovery |
+| **Dashed** | Tx $\to$ RelDeath | $\hat{\Lambda}_{02}(t)$ | Cumulative rate of relapse or death *before* PR |
+| **Dotted** | PR $\to$ RelDeath | $\hat{\Lambda}_{12}(t)$ | Cumulative rate of relapse or death *after* PR |
+
+**Clinical observations from the plot:**
+
+* **Early platelet recovery:** The solid line representing $\hat{\Lambda}_{01}(t)$ rises very steeply in the first few months and then essentially levels off horizontally after the first year. This plateau indicates that the instantaneous "velocity" (hazard) of platelet recovery drops to near zero; clinically, this means almost all patients who are going to recover their platelets do so early in the post-transplant period.
+* **Ongoing risk of relapse/death:** In contrast, both the dashed line $\hat{\Lambda}_{02}(t)$ and the dotted line $\hat{\Lambda}_{12}(t)$ continue to climb steadily over the entire 8-year follow-up period. This reflects the unfortunate clinical reality of an ongoing, continuous risk of relapse or death, regardless of whether a patient has recovered their platelets.
+* **Comparing the relapse Hazards:** Visually, the dashed curve (relapse/death *without* PR) is steeper and higher than the dotted curve (relapse/death *after* PR). This preliminary visual evidence suggests that failing to achieve platelet recovery is associated with a higher hazard of adverse outcomes, an observation we will formally test in subsequent modeling.
+
+**Methodological note: counting process syntax**
+
+A crucial difference to note here, compared to simpler survival models (like those in Exercise 1), is the syntax required for the `Surv()` object. Because patients enter the risk set for Transition 3 (PR $\to$ RelDeath) only *after* they achieve platelet recovery, they do not start being at risk at time $t=0$. To handle this delayed entry, the model must use the **counting-process syntax**: `Surv(Tstart, Tstop, status)`. This explicitly accounts for the time a patient enters the state (`Tstart`) and the time they exit it (`Tstop`).
+
+\newpage
+
+## Question 4 — State occupation probabilities (stacked plot)
+
+*Estimate and plot the state probabilities in a "stacked" plot.*
+
+### Theory
+
+The cumulative transition hazards from Q3 describe the **rates** of movement between states. The next step is to translate these rates into **state occupation probabilities**: at any time $t$, what fraction of patients is in each state?
+
+As shown in the course (slides 42–46), for a patient starting in state 0 (Transplant) at time 0, the three state probabilities are:
+
+- **Still in initial state** (alive, no PR, no R/D):
+$$
+P_0(t) = \Pr\{T > t\} = S(t)
+  = 1 - \int_0^t S(u^-)\,[\lambda_{01}(u) + \lambda_{02}(u)]\,du
+$$
+
+- **In platelet recovery** (alive, PR achieved, no R/D yet):
+$$
+P_1(t) = \Pr\{T_{PL} \le t,\; T_{RD} > t\}
+  = \int_0^t S(u^-)\,\lambda_{01}(u)\,P_{11}(u,t)\,du
+$$
+
+where $P_{11}(u,t) = \Pr\{T_{RD} > t \mid T_{PL} = u\}$ is the conditional probability of surviving in state 1 from PR time $u$ to time $t$.
+
+- **Relapse or death** (absorbing state, entered via either path):
+$$
+P_2(t) = P_{02}(t) + P_{012}(t)
+$$ 
+
+where $P_{02}(t) = \int_0^t S(u^-)\,\lambda_{02}(u)\,du$ is the probability of R/D **without** prior PR, and $P_{012}(t)$ is the probability of R/D **after** PR.
+
+The fundamental constraint holds at every $t$:
+$$
+P_0(t) + P_1(t) + P_2(t) = 1
+$$
+
+This is a generalisation of what we saw in Exercise 1: in competing risks $P_0(t) = S(t)$, $P_1(t) = F_1(t)$, $P_2(t) = F_2(t)$. The multistate model adds the intermediate state, making the calculation of $P_1(t)$ more complex (it depends on $\lambda_{12}$).
+
+### From hazards to probabilities: `probtrans()`
+
+The `mstate` function `probtrans()` converts the cumulative hazards estimated by `msfit()` into state probabilities using the **Aalen–Johansen product-limit** method for multistate models. The argument `predt = 0` means we predict from time 0 (transplant), i.e., the patient starts in state Tx with probability 1.
+
+### Stacked plot
+
+The **stacked plot** (slide 48) is the natural visualisation: the three state probabilities are plotted as filled areas stacked on top of each other, always summing to 1. At any vertical slice, the height of each coloured band gives $P_j(t)$.
+
+```{r q4-stacked, fig.width=8, fig.height=6}
+pt <- probtrans(msf1, predt = 0)
+plot(pt,
+     ord = c(3, 2, 1),
+     lwd = 2,
+     xlab = "Years since transplant",
+     ylab = "Prediction probabilities",
+     cex = 0.75,
+     type = "filled",
+     legend = c("Alive", "PR", "Relapse or death"))
+```
+
+The stacked probability plot visually represents the Aalen-Johansen estimates for the state occupation probabilities over time. Because we have defined a complete multi-state model, at any given time $t$, every patient must be in one of the three predefined states. Therefore, the sum of the probabilities across all states always equals exactly 1.
+
+Reading the plot vertically at a given time $t$ from bottom to top:
+
+1. **Bottom band (Orange): Relapse or Death.** This band represents $P_2(t)$, the probability of being in the absorbing state (having experienced relapse or death, regardless of whether Platelet Recovery occurred first). This band grows monotonically over time. Because it is an absorbing state, once patients enter this state, they never leave, continually adding to the "mass" at the bottom of the graph.
+2. **Middle band (Yellow): Platelet Recovery (PR).** This band represents $P_1(t)$, the probability of being alive and having achieved Platelet Recovery. Notice its dynamic shape: it expands rapidly in the first few months as many patients successfully achieve PR (flowing in via $\lambda_{01}$). However, over the longer term (years 2 through 7), the band gradually begins to shrink. This narrowing occurs because patients in this state are still subject to the risk of relapse or death ($\lambda_{12}$), causing them to flow "down" into the absorbing orange band.
+3. **Top band (Green): Initial State (Tx).** This band represents $P_0(t)$, the probability of still being in the initial state (alive, without PR, and without relapse/death). This band decreases very rapidly during the first year, indicating that the vast majority of patients transition out of this state early on—either favorably by achieving PR, or unfavorably by experiencing early relapse or death.
+
+**Methodological significance:**
+
+This plot represents the multi-state generalization of the stacked cumulative incidence curves used in standard competing risks analysis. In a simple competing risks scenario, we only track $S(t)$ (event-free survival) and the cumulative incidences $F_1(t)$ and $F_2(t)$. Here, the inclusion of the intermediate state (Platelet Recovery) adds a crucial *transient band* (the yellow area) that dynamically expands and contracts as the patient population flows through it toward the final absorbing state.
+
+\newpage
+
+## Exercise 2 — Recap and Roadmap
+
+### Clinical setting
+
+We analysed 2204 leukaemia patients from the EBMT registry who received bone marrow transplantation between 1995 and 1998. After transplant, patients could experience **platelet recovery** (PR, an intermediate favourable event) and/or **relapse or death** (R/D, the absorbing end-point). This gives rise to an **illness-death model** — the simplest multistate model that goes beyond competing risks by allowing an intermediate transient state.
+
+### From competing risks to multistate: what changes
+
+In Exercise 1 (ICU/Remdesivir) we had two absorbing events and no intermediate state: once a patient was extubated or died, the process stopped. Here the key novelty is that platelet recovery is **not absorbing** — patients who achieve PR remain at risk for R/D via $\lambda_{12}(t)$. This single additional arrow in the diagram is what separates a multistate model from a competing risks model.
+
+$$
+\underbrace{
+\text{Tx} \xrightarrow{\lambda_{01}} \text{PR} \xrightarrow{\lambda_{12}} \text{R/D}
+}_{\text{path through intermediate state}}
+\qquad\qquad
+\underbrace{
+\text{Tx} \xrightarrow{\lambda_{02}} \text{R/D}
+}_{\text{direct path}}
+$$
+
+### Conceptual roadmap
+
+**Q1 — How do we encode the model structure?**
+
+We built the **transition matrix** $\mathbf{T}$ via `transMat()`, a $3 \times 3$ matrix where entry $(r, s)$ contains the transition number if $r \to s$ is allowed, `NA` otherwise. Three transitions are defined:
+
+| \# | Transition | Hazard | Meaning |
+|:--:|:---:|:---:|:---|
+| 1 | Tx $\to$ PR | $\lambda_{01}(t)$ | Platelet recovery |
+| 2 | Tx $\to$ R/D | $\lambda_{02}(t)$ | Relapse/death before PR |
+| 3 | PR $\to$ R/D | $\lambda_{12}(t)$ | Relapse/death after PR |
+
+This matrix is the backbone of the entire `mstate` workflow and is passed to every subsequent function.
+
+**Q2 — How do we prepare the data?**
+
+We converted time from days to years and reshaped the data from **wide** (one row per patient) to **long counting-process** format (one row per patient-transition) using `msprep()`. In the long format each row contains $(T_{\text{start}},\, T_{\text{stop}}]$, the transition number, and a status indicator. A patient contributes 2 rows if censored or if R/D occurs before PR, and 3 rows if PR is reached first (adding the PR $\to$ R/D interval).
+
+**Q3 — What are the transition rates?**
+
+We estimated the **cumulative transition hazards** $\hat{\Lambda}_{rs}(t)$ by fitting a stratified Cox model with no covariates:
+
+$$
+\lambda_m(t) = \lambda_{0m}(t), \qquad m = 1, 2, 3
+$$
+
+Using `strata(trans)` gives each transition its own unrestricted baseline hazard. With no covariates, the Breslow estimator reduces to the **Aalen–Nelson** formula applied per transition:
+
+$$
+\hat{\Lambda}_{rs}^{AN}(t) = \sum_{t_{(j)} \le t} \frac{d_{j,rs}}{n_{j,rs}}
+$$
+
+The `msfit()` function extracts these from the fitted `coxph` object.
+The plot revealed that $\hat{\Lambda}_{01}$ levels off early (most PR events occur in the first year), while $\hat{\Lambda}_{02}$ and $\hat{\Lambda}_{12}$ keep increasing over time.
+
+**Q4 — What is the probability of being in each state over time?**
+
+We converted cumulative hazards into **state occupation probabilities** $P_j(t)$ via `probtrans()`, using the Aalen–Johansen product-limit estimator for multistate models. The three probabilities satisfy:
+
+$$
+P_0(t) + P_1(t) + P_2(t) = 1 \qquad \forall\, t
+$$
+
+The stacked plot provides the complete picture:
+
+- $P_0(t)$: probability of being alive without PR and without R/D (shrinks rapidly in year 1).
+- $P_1(t)$: probability of being alive with PR achieved (grows then shrinks — the hallmark of a transient state).
+- $P_2(t)$: probability of R/D, absorbing (grows monotonically).
+
+### Key take-home messages
+
+1. **Multistate $\supset$ competing risks.** The illness-death model is a natural extension: remove $\lambda_{12}$ and you recover the two-cause competing risks of Exercise 1. All competing risks quantities (CIF, cause-specific hazards) are special cases of the multistate framework.
+
+2. **Transition matrix = model definition.** The matrix `tmat` encodes which transitions are allowed and is used by every `mstate` function. Different clinical problems correspond to different matrices.
+
+3. **Long format is essential.** The counting-process representation $(T_{\text{start}}, T_{\text{stop}}]$ naturally handles delayed entries (transition 3 starts at the time of PR, not at time 0) and allows standard Cox machinery to be applied via `strata(trans)`.
+
+4. **Hazards $\to$ probabilities.** The two-step workflow `msfit()` $\to$ `probtrans()` converts transition-specific hazards into state probabilities. This mirrors the relationship $\Lambda_{rs}(t) \to P_j(t)$ from the course: hazards describe instantaneous rates, while state probabilities describe the population distribution across states at each time.
+
+5. **Transient vs absorbing states.** The stacked plot makes visible a key feature absent in competing risks: the transient state PR first accumulates probability (patients arriving from Tx) then loses it (patients leaving to R/D). Absorbing states only accumulate.
+
+\newpage
+
+# Lab 4 — Final Roadmap: Competing Risks and Multistate Models
+
+## The big picture
+
+This lab explored a unified framework for analysing **time-to-event data with multiple outcomes**. The two exercises are not independent — they form a progression from the simpler setting (competing risks) to the more general one (multistate models), sharing the same mathematical language.
+
+$$
+\boxed{\text{Standard survival}}
+\;\subset\;
+\boxed{\text{Competing risks (Ex. 1)}}
+\;\subset\;
+\boxed{\text{Multistate models (Ex. 2)}}
+$$
+
+In standard survival analysis there is one event and one hazard $\lambda(t)$. Competing risks introduce multiple absorbing events and cause-specific hazards $\lambda_k(t)$. Multistate models further add intermediate (transient) states and transition hazards $\lambda_{rs}(t)$ between any pair of allowed states.
+
+## Exercise 1 — Competing risks (ICU / Remdesivir)
+
+### Setting
+
+113 COVID-19 ICU patients, two absorbing events (extubation and death), one treatment comparison (Remdesivir vs standard of care).
+
+$$
+\text{Intubation}
+\xrightarrow{\;\lambda_1(t)\;}
+\text{Extubation}
+\qquad\qquad
+\text{Intubation}
+\xrightarrow{\;\lambda_2(t)\;}
+\text{Death in ICU}
+$$
+
+### What we did and why
+
+| Step | Question | Method | Key formula / concept |
+|:---:|:---|:---|:---|
+| Q1 | What is the probability of each event over time? | **Aalen–Johansen** CIF via `prodlim(Hist(time, event))` | $\hat{F}_k^{AJ}(t) = \sum_{t_{(j)} \le t} \hat{S}_{KM}(t_{(j-1)})\,\frac{d_{jk}}{n_j}$ |
+| Q1 | What fraction of patients is still in ICU? | **Kaplan–Meier** on the composite end-point (`event > 0`) | $\hat{S}(t) = 1 - \hat{F}_1(t) - \hat{F}_2(t)$ |
+| Q2 | Are the CIFs different between treatments? | **Gray test** via `cuminc()` | $H_0: \lambda_{A,k}^*(t) = \lambda_{B,k}^*(t)\;\forall\,t$ (sub-distribution hazard) |
+| Q3 | What is the instantaneous rate of each event? | **Aalen–Nelson** cumulative cause-specific hazard | $\hat{\Lambda}_k(t) = \sum_{t_{(j)} \le t} d_{jk}/n_j$, with competing events as censorings |
+| Q3 | What is the overall rate of leaving ICU? | Composite end-point hazard | $\Lambda(t) = \Lambda_1(t) + \Lambda_2(t)$ (additivity) |
+| Q4 | What happens if we naively use 1 - KM? | AJ vs KM comparison | KM **overestimates** $F_k(t)$ because it violates independent censoring |
+
+### Core lesson
+
+Two types of hazard serve two different purposes:
+
+$$
+\lambda_k(t)\;\text{(cause-specific)}
+\quad\longrightarrow\quad
+\text{aetiological question: rate among event-free subjects}
+$$
+
+$$
+\lambda_k^*(t)\;\text{(sub-distribution)}
+\quad\longrightarrow\quad
+\text{prognostic question: direct link to } F_k(t)
+$$
+
+You cannot use a log-rank test on $\lambda_k$ to compare $F_k$ across
+groups, because each CIF depends on **both** cause-specific hazards:
+$F_k(t) = \int_0^t S(u^-)\,\lambda_k(u)\,du$.
+
+---
+
+## Exercise 2 — Multistate model (EBMT / bone marrow transplant)
+
+### Setting
+
+2204 leukaemia patients, one intermediate state (platelet recovery) and
+one absorbing state (relapse or death). The illness-death model:
+
+$$
+\text{Tx}
+\xrightarrow{\;\lambda_{01}(t)\;}
+\text{PR}
+\xrightarrow{\;\lambda_{12}(t)\;}
+\text{R/D}
+\qquad\qquad
+\text{Tx}
+\xrightarrow{\;\lambda_{02}(t)\;}
+\text{R/D}
+$$
+
+### What we did and why
+
+| Step | Question | Method | Key concept |
+|:---:|:---|:---|:---|
+| Q1 | How do we define the model? | **Transition matrix** via `transMat()` | $3\times 3$ matrix encoding allowed transitions (1, 2, 3) and `NA` elsewhere |
+| Q2 | How do we prepare the data? | **Wide $\to$ long** reshaping via `msprep()` | Counting-process format $(T_{\text{start}}, T_{\text{stop}}]$ per patient-transition |
+| Q3 | What are the transition rates? | **Stratified Cox** (no covariates) + `msfit()` | $\hat{\Lambda}_{rs}(t) = \sum d_{j,rs}/n_{j,rs}$ (Aalen–Nelson per transition) |
+| Q4 | What fraction of patients is in each state? | **State probabilities** via `probtrans()` | $P_0(t) + P_1(t) + P_2(t) = 1$ — Aalen–Johansen for multistate |
+
+### Core lesson
+
+The multistate framework generalises competing risks by adding **transient states**. The stacked probability plot is the multistate analogue of the CIF plot: it partitions the entire cohort across states at every time point, with the constraint that all probabilities sum to 1.
+
+---
+
+## Connecting the two exercises
+
+| Concept | Exercise 1 (Competing risks) | Exercise 2 (Multistate) |
+|:---|:---|:---|
+| **States** | 1 initial + 2 absorbing | 1 initial + 1 transient + 1 absorbing |
+| **Transitions** | $\lambda_1$, $\lambda_2$ | $\lambda_{01}$, $\lambda_{02}$, $\lambda_{12}$ |
+| **CIF / State prob.** | $F_k(t) = \Pr\{T \le t,\,\varepsilon = k\}$ | $P_j(t) = \Pr\{\text{in state } j \text{ at } t\}$ |
+| **Partition of 1** | $S(t) + F_1(t) + F_2(t) = 1$ | $P_0(t) + P_1(t) + P_2(t) = 1$ |
+| **Estimator** | Aalen–Johansen (2-state) | Aalen–Johansen (general multistate) |
+| **Hazard estimation** | Aalen–Nelson per cause | Aalen–Nelson per transition (stratified Cox) |
+| **Data format** | Standard (one row per patient) | Long counting-process (one row per transition) |
+| **R packages** | `prodlim`, `cmprsk` | `mstate` |
+| **Testing** | Gray test (sub-distribution hazard) | Not covered here (possible via Cox on transitions) |
+
+## Five take-home messages for the entire lab
+
+1. **Competing risks $\subset$ multistate.** Every competing risks problem is a multistate model with only absorbing exits from the initial state. Learning the multistate language automatically covers competing risks as a special case.
+
+2. **Never use $1 - KM$ for the CIF.** When competing events exist, treating them as independent censorings leads to upward-biased incidence estimates. Always use the Aalen–Johansen estimator.
+
+3. **Match the hazard to the question.** Cause-specific hazards answer aetiological questions (what drives the event among those still at risk). Sub-distribution hazards and CIFs answer prognostic questions (what is the actual probability of the event over time). Testing must use the hazard that matches the target.
+
+4. **State probabilities give the full picture.** Whether in competing risks ($S + F_1 + F_2 = 1$) or in multistate models ($\sum_j P_j = 1$), stacked probability plots provide a complete, coherent view of how the cohort distributes across states over time.
+
+5. **The `mstate` workflow is modular.** Define the structure (`transMat`) $\to$ reshape data (`msprep`) $\to$ estimate hazards (`coxph` + `msfit`) $\to$ compute probabilities (`probtrans`). Each step builds on the previous one, and covariates can be added at the Cox step without changing the rest of the pipeline.
