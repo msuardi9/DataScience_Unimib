@@ -1,0 +1,1240 @@
+---
+title: "Lab 2 - Cox Regression Model"
+author: "Matteo Suardi"
+date: "`r Sys.Date()`"
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 1
+    number_sections: false
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
+```
+
+\newpage 
+
+# Introduction
+
+We work on a dataset from a **randomised controlled clinical trial** on $N = 476$ women with advanced ovarian cancer. The objective is to compare three treatment regimens:
+
+- **CAP** (cyclophosphamide + adriamycin + cisplatin, `treat = 1`)
+- **CP** (cyclophosphamide + cisplatin, `treat = 2`)
+- **P** (cisplatin monotherapy, `treat = 3`)
+
+The endpoint is **overall survival** (OS), defined as the time from randomisation to death from any cause. Available prognostic factors are residual tumour size (`tures`), Karnofsky performance index (`kar`), histology (`histo`), and FIGO stage (`figo`).
+
+## Data loading and recording
+
+The original variables are recorded into clinically meaningful categories following the lab instructions.
+
+```{r data-loading}
+ova <- read.table("ovarian.txt", na.strings = ".", header = TRUE, row.names = NULL)
+
+names(ova)
+head(ova)
+summary(ova$survtime)  
+```
+
+Convert survival time from days to years:
+
+```{r}
+ova$survtime <- ova$survtime / 365.25
+```
+
+Record residual tumor size into 3 categories:
+
+- **0** = abstent / micro / $\le$ 1 cm / 1-2 cm (tures 1-4) $\rightarrow$ "$\le$ 2 cm"
+- **1** = 2-5 cm / 5-10 cm (tures 5-6) $\rightarrow$ "2-10 cm"
+- **2** = $\ge$ 10 cm (tures 7) $\rightarrow$ "$\ge$ 10 cm"
+
+```{r}
+ova$turesc <- ifelse(ova$tures <= 4, 0, ifelse(ova$tures >= 7, 2, 1))
+```
+
+Recode **Karnofsky Index** into binary:
+
+- **0** = kar $\le$ 70  (impaired performance)
+- **1** = kar $>$  70  (good performance)
+
+```{r}
+ova$karc <- ifelse(ova$kar <= 70, 0, 1)
+```
+
+Recode **Histology** into binary (serous vs. non-serous):
+
+- 0 = serous  (histo = 1 or 7)
+- 1 = non-serous (histo = 2-6)
+
+```{r}
+ova$histoc <- ifelse(ova$histo == 1 | ova$histo == 7, 0, 1)
+```
+
+```{r}
+head(ova)
+str(ova)
+```
+
+\newpage
+
+# Question 1: Kaplan-Meier survival curves by treatment
+
+*Estimate the KM survival function for each treatment.*
+
+## Theoretical background
+
+In survival analysis, each individual holds a true lifetime $X$ and a censoring time $C$.
+Due to **right censoring**, we can only observe:
+
+$$T = \min(X, C)$$
+together with the event indicator:
+
+$$\delta = \begin{cases} 1 & \text{if } X \leq C \quad (\text{event observed}) \\ 0 & \text{if } X > C \quad (\text{censored}) \end{cases}$$
+
+A key assumption is that the **censoring process is independent** of the failure process.
+
+The **survival function** $S(t) = P(X > t)$ represents the probability of surviving beyond time $t$. It is estimated nonparametrically by the **Kaplan-Meier (Product-Limit) estimator**.
+
+Let $t_{(1)} < t_{(2)} < \dots < t_{(J)}$ be the **distinct observed event times**.
+At each event time $t_{(j)}$, let:
+
+- $n_j$ = number of individuals **at risk** just before $t_{(j)}$
+- $d_j$ = number of **events** (deaths) at $t_{(j)}$
+
+The KM estimator is:
+
+$$\hat{S}_{KM}(t) = \prod_{j \,:\, t_{(j)} \leq t} \left(1 - \frac{d_j}{n_j}\right)$$
+
+The intuition is that to survive past time $t$, a patient must survive **each** of the preceding event times. Each factor $\hat{p}_j = 1 - d_j / n_j$ is the estimated conditional probability of surviving past $t_{(j)}$, given survival up to that point.
+
+The KM curve is a **decreasing step function** that changes only at event times.
+Its variance is estimated via the **Greenwood formula**:
+
+$$\widehat{Var}\!\left[\hat{S}_{KM}(t)\right] = \hat{S}_{KM}(t)^2 \sum_{j \,:\, t_{(j)} \leq t} \frac{d_j}{n_j(n_j - d_j)}$$
+
+```{r}
+library(survival)
+
+fit<-survfit(Surv(survtime, surv) ~ treat, data=ova)
+
+plot(fit[treat=1]$time, fit[treat=1]$surv, 
+     type='s',
+     col=1, 
+     ylim=c(0,1), xlim=c(0,13), 
+     xlab='time (years)', ylab='survival probability')
+
+lines(fit[treat=2]$time, fit[treat=2]$surv, type='s', lwd=2,col=2)
+lines(fit[treat=3]$time, fit[treat=3]$surv, type='s', lwd=3,col=3)
+
+legend("top",legend=c("CAP","CP","P"),col=c(1,2,3),lwd=c(1,2,3),lty=1)
+```
+
+The three KM curves provide a visual comparison of overall survival across the treatment arms. CAP is the polychemotherapy regimen including adriamycin, CP is a two-drug combination, and P is cisplatin monotherapy. 
+
+**As seen in the plot, the curves clearly separate over time, which suggests a distinct treatment effect:** the CAP regimen consistently shows the highest survival probability throughout the follow-up period, followed by CP, while P demonstrates the lowest survival. 
+
+However, the KM estimator is purely **descriptive and nonparametric**: it does not adjust for any confounders (prognostic factors). To formally test whether these observed differences are statistically significant, we need **nonparametric hypothesis tests**, and to adjust for prognostic factors, we will use the **Cox proportional hazards model**.
+
+\newpage
+
+# Question 2: Nonparametric tests for equality of survival curves
+
+*Test the null hypothesis of equality of the survival curves, by using nonparametric tests.*
+
+## Theoretical background
+
+To compare survival curves across groups, we cannot simply compare survival at a single arbitrary time point (this would be inefficient and the choice of the time point is arbitrary).
+Instead, we use **rank-based nonparametric tests** that exploit information across all event times.
+
+### The Log-Rank test
+
+Consider two groups $A$ and $B$. At each distinct event time $t_{(j)}$, we construct a $2 \times 2$ contingency table of deaths vs. alive, by group:
+
+| | Group A | Group B | Total |
+|---|---|---|---|
+| Deaths | $d_{Aj}$ | $d_{Bj}$ | $d_j$ |
+| Alive | $n_{Aj} - d_{Aj}$ | $n_{Bj} - d_{Bj}$ | $n_j - d_j$ |
+| At risk | $n_{Aj}$ | $n_{Bj}$ | $n_j$ |
+
+Under $H_0: \lambda_A(t) = \lambda_B(t) \;\; \forall \, t$, the number of deaths in group $A$ at time $t_{(j)}$ follows a **hypergeometric distribution** with:
+
+$$E(d_{Aj}) = \frac{n_{Aj} \cdot d_j}{n_j}, \qquad
+Var(d_{Aj}) = \frac{d_j(n_j - d_j) \, n_{Aj} \, n_{Bj}}{n_j^2(n_j - 1)}$$
+
+Summing over all $J$ event times, the **Log-Rank** (Mantel-Haenszel) statistic is:
+
+$$Q_{MH} = \frac{\left\{\sum_{j=1}^{J}\left[d_{Aj} - E(d_{Aj})\right]\right\}^2}{\sum_{j=1}^{J} Var(d_{Aj})}
+\;\;\underset{H_0}{\sim}\;\; \chi^2_1$$
+
+For $K > 2$ groups, the test generalises to a $\chi^2$ with $K-1$ degrees of freedom.
+
+### Weighted tests: a general framework
+
+All these tests belong to a **general class of weighted rank tests**:
+$$Q = \frac{\left\{\sum_{j=1}^{J} w_j\left[d_{Aj} - E(d_{Aj})\right]\right\}^2}{\sum_{j=1}^{J} w_j^2 \, Var(d_{Aj})}$$
+
+The choice of weights $w_j$ determines the test and its sensitivity:
+
+| Weight $w_j$ | Test | Sensitivity |
+|---|---|---|
+| $w_j = 1$ | **Log-Rank** (Mantel-Haenszel, 1959) | Equal weight to all times; most powerful under **proportional hazards** |
+| $w_j = n_j$ | **Wilcoxon** (Gehan, 1965) | More weight to **early** event times (when more subjects are at risk) |
+| $w_j = \sqrt{n_j}$ | **Tarone-Ware** (1977) | Intermediate |
+
+More generally, the **Harrington-Fleming** (1982) class uses:
+
+$$w_{p,q}(t_j) = \left[\hat{S}(t_{j-1})\right]^p \left[1 - \hat{S}(t_{j-1})\right]^q, \quad p \geq 0, \; q \geq 0$$
+
+where $\hat{S}$ is the KM estimate on the **combined sample**. Setting $p = 0, q = 0$ yields the log-rank test; $p > 0, q = 0$ gives more weight to early differences; $p = 0, q > 0$ gives more weight to late differences.
+
+The choice of the test should be made **a priori**, based on the alternative hypothesis against which we want the most power.
+
+```{r question2-tests}
+# Log-Rank test (default in survdiff, rho = 0) 
+logrank_test <- survdiff(Surv(survtime, surv) ~ treat, data = ova)
+logrank_test
+
+# Wilcoxon (Prentice) test (rho = 1 in survdiff)
+wilcoxon_test <- survdiff(Surv(survtime, surv) ~ treat, data = ova, rho = 1)
+wilcoxon_test
+```
+
+The **Log-Rank test** is the most powerful test when the hazard ratio between groups is approximately constant over time (i.e., under **proportional hazards**). This is the default and most commonly used test in clinical trials. 
+
+The **Wilcoxon test** (`rho = 1` in `survdiff`, which implements the Prentice variant of the Gehan-Wilcoxon test) gives more weight to earlier event times. It may be preferred when treatment differences are expected to manifest early in the follow-up. 
+
+Note that in the provided R output, the Log-Rank test yielded $\chi^2_2 = 6.6$ ($p = 0.04$), while the Wilcoxon test gave $\chi^2_2 = 4.4$ ($p = 0.1$). This discrepancy illustrates how the choice of weights affects the conclusion: the log-rank detects a significant difference at the 5% level (consistent with a proportional hazards alternative), while the Wilcoxon does not, suggesting that treatment differences are **not concentrated in the early** follow-up period.
+
+**Important**: `survdiff` with `rho = 0` (or omitted, as in the first call) corresponds to the log-rank test, while `rho = 1` corresponds to the Prentice-Wilcoxon test (a member of the Harrington-Fleming $G^{\rho}$ family with $p = \rho$, $q = 0$).
+
+\newpage
+
+# Question 3: Stratified non-parametric tests 
+
+*Test the null hypothesis of equality of the survival curves (specific for treatment), by using nonparametric
+hypothesis tests stratifying for the prognostic factors.*
+
+## Theoretical background
+
+The unstratified log-rank test from Question 2 tests the **marginal** (overall) equality of survival curves across treatments. However, if prognostic factors are unevenly distributed across treatment arms, the marginal comparison may be **confounded**.
+
+The **stratified log-rank test** addresses this by applying the Cochran-Mantel-Haenszel principle: compute the observed-minus-expected counts **within each stratum** of the confounding variable, and then **sum across strata**. This is analogous to the stratified analysis used in epidemiology for $2 \times 2$ tables.
+
+Suppose we have $M$ strata defined by a prognostic factor. Within stratum $m$, at each event time $t_{(j)}$, the observed and expected deaths in the treatment group $A$ are $d_{Aj}^{(m)}$ and $E(d_{Aj}^{(m)})$ respectively. The stratified log-rank statistic is:
+
+$$Q_{stratified} = \frac{\left\{\sum_{m=1}^{M} \sum_{j=1}^{J_m} \left[d_{Aj}^{(m)} - E\!\left(d_{Aj}^{(m)}\right)\right]\right\}^2} {\sum_{m=1}^{M} \sum_{j=1}^{J_m} Var\!\left(d_{Aj}^{(m)}\right)} \;\;\underset{H_0}{\sim}\;\; \chi^2_{K-1}$$
+
+The key idea is that **within each stratum**, patients are more homogeneous with respect to the confounding variable, so the comparison between treatment groups is "cleaner". The test then pools the evidence from all strata.
+
+This is the nonparametric analogue of what the Cox model achieves parametrically when adjusting for covariates or when using the stratified Cox model. However, as noted in the course, regression models such as Cox offer several advantages over stratified nonparametric tests: they can adjust for **multiple** covariates simultaneously, they quantify the treatment effect through the **hazard ratio**, and they allow testing for **interactions**.
+
+```{r question3-stratified}
+# Stratified Log-Rank test: stratifying by Karnofsky Index (karc) 
+survdiff(Surv(survtime, surv) ~ treat + strata(karc), data = ova)
+
+# Stratified Log-Rank test: stratifying by residual tumour size (turesc) 
+survdiff(Surv(survtime, surv) ~ treat + strata(turesc), data = ova)
+
+# Stratified Log-Rank test: stratifying by FIGO stage 
+survdiff(Surv(survtime, surv) ~ treat + strata(figo), data = ova)
+
+# Stratified Log-Rank test: stratifying by histotype (histoc) 
+survdiff(Surv(survtime, surv) ~ treat + strata(histoc), data = ova)
+```
+
+In `survdiff`, the syntax `+ strata(variable)` specifies the stratification factor. The function computes the log-rank statistic within each level of the stratification variable and pools the results into a single overall test of treatment effect.
+
+By comparing the results of the **unstratified** test (p = 0.04, from the previous analysis) with these **stratified** tests, we can assess:
+
+1. **Robustness**: If the treatment effect remains significant after stratifying for a prognostic factor, this suggests that the observed effect is not driven by confounding due to that factor. In the provided output, the treatment effect remains significant when stratifying by `karc` (p = 0.04), `figo` (p = 0.01), and `histoc` (p = 0.02).
+2. **Confounding**: If the p-value changes substantially after stratification, this signals that the prognostic factor was unevenly distributed across treatment arms and was confounding the marginal treatment comparison. Notably, when stratifying by `turesc`, the p-value increases to 0.09, losing significance at the 5% level. This suggests that `turesc` is a confounder influencing the treatment effect.
+
+Note that this approach adjusts for **one** prognostic factor at a time. To simultaneously adjust for **all** prognostic factors, we will need the **Cox regression model**, which is the semiparametric counterpart of this stratified nonparametric approach.
+
+\newpage
+
+# Question 4: Cox model with treatment covariate only
+
+*Fit the Cox model including the treat covariate.*
+
+## Theoretical background
+
+### The Cox Proportional Hazards model
+
+The **Cox model** (Cox, 1972) is a **semiparametric** regression model that relates the hazard function to a set of covariates $\mathbf{x}$ through the equation:
+
+$$\lambda(t; \mathbf{x}) = \lambda_0(t) \cdot \exp(\boldsymbol{\beta}' \mathbf{x})$$
+
+where:
+
+- $\lambda_0(t)$ is the **baseline hazard function** (nonparametric, completely unspecified), corresponding to a subject with $\mathbf{x} = \mathbf{0}$
+- $\exp(\boldsymbol{\beta}' \mathbf{x})$ is the **parametric** multiplicative covariate effect
+
+A key property is that the **hazard ratio** (HR) between two subjects with covariate vectors $\mathbf{x}_1$ and $\mathbf{x}_0$ is **constant in time**:
+
+$$HR(\mathbf{x}_1 \text{ vs } \mathbf{x}_0) = \frac{\lambda(t; \mathbf{x}_1)}{\lambda(t; \mathbf{x}_0)}
+= \frac{\lambda_0(t)\exp(\boldsymbol{\beta}'\mathbf{x}_1)}{\lambda_0(t)\exp(\boldsymbol{\beta}'\mathbf{x}_0)}
+= \exp\!\big[\boldsymbol{\beta}'(\mathbf{x}_1 - \mathbf{x}_0)\big]$$
+
+This is the **proportional hazards (PH) assumption**: the ratio of hazards does not depend on time.
+
+For a single binary covariate $X \in \{0, 1\}$:
+$$HR(X\!=\!1 \text{ vs } X\!=\!0) = \exp(\beta)$$
+
+- $\beta > 0 \;\Rightarrow\; HR > 1$: the covariate **increases** the hazard (risk factor)
+- $\beta < 0 \;\Rightarrow\; HR < 1$: the covariate **decreases** the hazard (protective)
+- $\beta = 0 \;\Rightarrow\; HR = 1$: no effect
+
+### Partial Likelihood estimation
+
+The Cox model is estimated via **partial likelihood** (PL), which depends only on
+$\boldsymbol{\beta}$ and not on $\lambda_0(t)$. Let $t_{(1)} < \dots < t_{(J)}$ be the distinct failure times and
+$R(t_{(j)})$ the risk set at time $t_{(j)}$. The log-partial-likelihood is:
+
+$$\ell_{PL}(\boldsymbol{\beta} \mid data) = \sum_{j=1}^{J}
+\left[\boldsymbol{\beta}' \mathbf{x}_{(j)} - \log\!\left(\sum_{i \in R(t_{(j)})}
+\exp(\boldsymbol{\beta}'\mathbf{x}_i)\right)\right]$$
+
+where $\mathbf{x}_{(j)}$ is the covariate vector of the subject who fails at $t_{(j)}$.
+The estimator $\hat{\boldsymbol{\beta}}$ is found by solving the score equations $U_k(\boldsymbol{\beta}) = 0$.
+
+### Hypothesis testing
+
+Three asymptotically equivalent tests are available for $H_0: \beta_k = 0$:
+
+- **Likelihood Ratio test**: $Q_{LR} = 2\left[\ell_{PL}(\hat{\boldsymbol{\beta}}) - \ell_{PL}(\mathbf{0})\right]$
+- **Wald test**: $Q_W = \hat{\beta}_k^2 / \widehat{Var}(\hat{\beta}_k)$
+- **Score test**: $Q_S$. Notably, the Score test with a single covariate and no ties is **equivalent to the Log-Rank test**
+
+### Categorical covariates and reference category
+
+Treatment has 3 levels (CAP=1, CP=2, P=3), so it enters the model as a **factor** with 2 dummy variables and one **reference category**. By default in R, `factor(treat)` uses level 1 (CAP) as the reference. 
+
+```{r question4-cox-treat}
+# Model 4a: Cox model with treat as factor (default reference: CAP = 1) 
+model4a <- coxph(Surv(survtime, surv) ~ factor(treat), data = ova)
+summary(model4a)
+```
+
+With the default reference (CAP), the two estimated HRs represent:
+
+- $HR(\text{CP vs CAP}) = \exp(\hat{\beta}_{\text{CP}})$
+- $HR(\text{P vs CAP}) = \exp(\hat{\beta}_{\text{P}})$
+
+However, from a clinical standpoint it is more natural to use the **monotherapy P** as the reference, since CAP and CP are the experimental polychemotherapy regimens.
+We use `relevel()` to change the baseline:
+
+```{r question4-cox-relevel}
+# Model 4b: Cox model with P (treat=3) as reference 
+treat.r <- relevel(factor(ova$treat), ref = 3)
+model4b <- coxph(Surv(survtime, surv) ~ treat.r, data = ova)
+summary(model4b)
+```
+
+The Cox proportional hazards model estimates the hazard ratio (HR) between treatment groups. The choice of the reference category changes the interpretation of the coefficients ($\beta$) and the hazard ratios ($\exp(\beta)$).
+
+#### Model 1: Treatment 1 (CAP) as Reference
+
+In the first model (`factor(treat)`), treatment 1 (CAP) is the reference category. The estimated parameters represent:
+- $HR(\text{CP vs CAP}) = \exp(\hat{\beta}_{\text{treat2}})$
+- $HR(\text{P vs CAP}) = \exp(\hat{\beta}_{\text{treat3}})$
+
+From the provided R output, we have:
+
+| Treatment | $\hat{\beta}$ | S.E. | $HR$ ($\exp(\beta)$) | 95% CI for HR | p-value |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| CAP (ref, treat 1) | 0 | — | 1 | — | — |
+| CP (treat 2) | 0.1700 | 0.1240 | 1.185 | (0.93; 1.51) | 0.1702 |
+| P (treat 3) | 0.3157 | 0.1230 | 1.371 | (1.08; 1.75) | 0.0103 |
+
+An $HR > 1$ indicates a **higher hazard of death** (worse prognosis) compared to the reference. Here, cisplatin monotherapy (P, treat 3) has a significantly higher hazard than CAP ($HR = 1.37$, $p = 0.0103$), indicating a worse survival outcome. The two-drug combination (CP, treat 2) has a slightly higher hazard ($HR = 1.185$), but this difference is not statistically significant ($p = 0.1702$).
+
+#### Model 2: Treatment 3 (P) as Reference
+
+In the second model (`treat.r`), the reference category has been changed (likely to treatment 3, P). The output shows:
+
+| Treatment | $\hat{\beta}$ | S.E. | $HR$ ($\exp(\beta)$) | 95% CI for HR | p-value |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| P (ref, implicitly) | 0 | — | 1 | — | — |
+| CAP (treat.r1) | -0.3157 | 0.1230 | 0.729 | (0.57; 0.93) | 0.0103 |
+| CP (treat.r2) | -0.1457 | 0.1206 | 0.864 | (0.68; 1.09) | 0.2269 |
+
+An $HR < 1$ indicates a **lower hazard of death** (better prognosis) compared to the reference. This model confirms that CAP has a significantly lower hazard compared to P ($HR = 0.729$, $p = 0.0103$), which is mathematically equivalent to the previous finding ($1 / 1.371 \approx 0.729$).
+
+#### Global Tests
+
+Note that the **Score (logrank) test** from both models (6.63 on 2 df, $p=0.04$) is nearly identical to the **Log-Rank test** from the nonparametric analysis (`survdiff`), as expected, since the Score test in a Cox model with a single categorical covariate is asymptotically equivalent to the log-rank test. The Likelihood ratio test (6.62) and Wald test (6.59) also confirm the overall significance of the treatment variable.
+
+This model is **unadjusted**: it does not account for potential confounders (prognostic factors). To obtain an adjusted estimate of the treatment effect, we need to include the other covariates.
+
+\newpage
+
+# Question 5: Adjusted Cox model (treatment + prognostic factors)
+
+*Fit the Cox model including the treat covariate and adjusting for the other prognostic factors.*
+
+## Theoretical background
+
+### Why adjust for prognostic factors?
+
+As discussed in the course, regression models in survival analysis serve several purposes:
+
+1. **Quantify** the treatment effect through the hazard ratio
+2. **Adjust for imbalances** in prognostic factors across treatment arms
+3. **Evaluate prognostic factors** and their independent contribution to survival
+4. **Develop a model for survival probability** (used in Questions 6--7)
+
+Even in a randomised clinical trial (where treatment groups are expected to be balanced on average), adjusting for prognostic factors can:
+
+- Remove residual confounding due to chance imbalances
+- Increase the **precision** of the treatment effect estimate (narrower confidence intervals)
+- Provide a more accurate model of the data-generating process
+
+### The multivariable Cox model
+
+The adjusted model takes the form:
+
+$$\lambda(t; \mathbf{x}) = \lambda_0(t) \cdot \exp\!\left(\beta_1 x_{\text{CP}} + \beta_2 x_{\text{P}} + \beta_3 x_{\text{FIGO}} + \beta_4 x_{\text{karc}} + \beta_5 x_{\text{turesc}} + \beta_6 x_{\text{histoc}}\right)$$
+
+where the baseline ($\lambda_0(t)$) corresponds to a patient with all covariates equal to their reference categories: CAP treatment, FIGO I, Karnofsky $\leq 70$, residual tumour $\leq 2$ cm, and serous histotype.
+
+Each $\exp(\hat{\beta}_k)$ is now an **adjusted hazard ratio**, quantifying the effect of covariate $x_k$ while holding all other covariates constant. This is the key advantage over the unadjusted model in Question 4.
+
+### Comparing nested models: Likelihood Ratio Test
+
+To formally test whether the prognostic factors as a group contribute significantly to the model beyond treatment alone, we compare the **nested** models:
+
+- **Model 4** (reduced): treatment only ($p_0 = 2$ parameters)
+- **Model 5** (full): treatment + prognostic factors ($p_1 = 2 + \text{extra parameters}$)
+
+The **Likelihood Ratio Test** statistic is:
+
+$$Q_{LR} = 2\left[\ell_{PL}(\hat{\boldsymbol{\beta}}_{\text{full}}) - \ell_{PL}(\hat{\boldsymbol{\beta}}_{\text{reduced}})\right] \;\;\underset{H_0}{\sim}\;\; \chi^2_{p_1 - p_0}$$
+
+Under $H_0$, the additional covariates have no effect ($\beta_3 = \beta_4 = \dots = 0$).
+A significant result indicates that the prognostic factors improve the model fit.
+
+```{r question5-adjusted}
+# Unadjusted model 
+model4 <- coxph(Surv(survtime, surv) ~ factor(treat), data = ova)
+
+# Adjusted model: treatment + all prognostic factors
+model5 <- coxph(Surv(survtime, surv) ~ factor(treat) + factor(figo) +
+                  factor(karc) + factor(turesc) + factor(histoc), data = ova)
+summary(model5)
+```
+
+```{r question5-lrt}
+# Likelihood Ratio Test: Model 5 vs Model 4 
+anova(model4, model5)
+```
+
+The `summary()` output for the multivariable model reports, for each covariate:
+* $\hat{\beta}$ (`coef`): the log-hazard ratio
+* $\exp(\hat{\beta})$ (`exp(coef)`): the **adjusted hazard ratio** (HR)
+* `se(coef)`: standard error of $\hat{\beta}$
+* `z` and `Pr(>|z|)`: **Wald test** for $H_0: \beta_k = 0$
+* 95% CI for the HR: $\exp\!\left(\hat{\beta} \pm 1.96 \cdot SE(\hat{\beta})\right)$
+
+Based on the provided R output, the adjusted model yields the following estimates (assuming reference categories based on standard clinical coding, e.g., CAP for treatment, small size for tumour, etc.):
+
+| Covariate | $\hat{\beta}$ | $HR$ ($\exp(\beta)$) | 95% CI for HR | p-value | Interpretation |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **treat2** (CP vs CAP) | 0.1858 | 1.204 | (0.94; 1.54) | 0.140 | Not significant |
+| **treat3** (P vs CAP) | 0.3134 | 1.368 | (1.07; 1.75) | 0.012 | Higher risk than CAP |
+| **figo2** (FIGO II vs I) | 0.3596 | 1.433 | (1.03; 1.99) | 0.033 | Significant risk factor |
+| **figo3** (FIGO III vs I) | 0.4119 | 1.510 | (1.09; 2.08) | 0.012 | Significant risk factor |
+| **karc1** (Karnofsky $>70$ vs $\leq70$) | -0.3931 | 0.675 | (0.52; 0.88) | 0.004 | Protective |
+| **turesc1** (Tumour med. vs small) | 0.7019 | 2.018 | (1.56; 2.60) | < 0.001 | Strong risk factor |
+| **turesc2** (Tumour large vs small) | 1.0944 | 2.987 | (2.29; 3.89) | < 0.001 | Strongest risk factor |
+| **histoc1** (Non-serous vs serous) | 0.2385 | 1.269 | (1.03; 1.56) | 0.023 | Significant risk factor |
+
+#### Key observations:
+* **Treatment effect stability**: The treatment effect remains very similar after adjustment ($HR_{\text{treat3}} = 1.368$), confirming that the unadjusted estimate ($HR = 1.371$) was not substantially confounded. This is expected in a **randomised trial** where covariates are generally balanced across arms by design.
+* **Residual tumour size** is the strongest prognostic factor: patients with the largest tumours (`turesc2`) have nearly 3 times the hazard of death ($HR = 2.987$) compared to those with small tumours.
+* **Karnofsky Index** (`karc1`) is protective ($HR = 0.675$), meaning patients with better performance status have approximately a 32.5% lower hazard of death compared to the baseline group.
+* The **Analysis of Deviance Table (`anova()`)** provides the Likelihood Ratio Test comparing the unadjusted model (Model 1: treatment only) and the adjusted model (Model 2: treatment + prognostic factors). The highly significant result ($\chi^2_6 = 110.16$, $p < 2.2e-16$) confirms that adding these prognostic factors collectively and significantly improves the model's goodness of fit.
+
+\newpage
+
+# Question 6: Baseline and individual survival curves from the Cox model
+
+*From the Cox model in 5. estimate and plot:  1. the baseline survival curve, 2. the survival curve for a patient treated with CP having the following characteristics: FIGO= III, Karnofsky Index =80, residual tumor size=3 cm, histotype=3.*
+
+### From hazard to survival in the Cox model
+
+A fundamental relationship in survival analysis links the survival function to the cumulative hazard:
+
+$$S(t) = \exp\!\left[-\Lambda(t)\right], \qquad \text{where} \quad \Lambda(t) = \int_0^t \lambda(u)\,du$$
+
+In the Cox PH model $\lambda(t;\mathbf{x}) = \lambda_0(t)\exp(\boldsymbol{\beta}'\mathbf{x})$, this becomes:
+
+$$\Lambda(t;\mathbf{x}) = \exp(\boldsymbol{\beta}'\mathbf{x}) \cdot \underbrace{\int_0^t \lambda_0(u)\,du}_{\Lambda_0(t)}$$
+
+Therefore, the survival function for a subject with covariates $\mathbf{x}$ can be written as:
+
+$$\boxed{S(t;\mathbf{x}) = \exp\!\left[-\Lambda_0(t)\cdot\exp(\boldsymbol{\beta}'\mathbf{x})\right]
+= \left[S_0(t)\right]^{\exp(\boldsymbol{\beta}'\mathbf{x})}}$$
+
+where $S_0(t) = \exp[-\Lambda_0(t)]$ is the **baseline survival function**, i.e.\ the survival of a hypothetical subject with all covariates equal to 0 (all reference categories).
+
+### Estimating the baseline quantities
+
+Since the partial likelihood depends only on $\boldsymbol{\beta}$ and not on $\lambda_0(t)$, the baseline cumulative hazard $\Lambda_0(t)$ must be estimated separately. The **Breslow estimator** is:
+
+$$\hat{\Lambda}_0(t) = \sum_{j:\,t_{(j)}\leq t} \frac{d_j}{\sum_{i \in R(t_{(j)})} \exp(\hat{\boldsymbol{\beta}}'\mathbf{x}_i)}$$
+
+In R, the function `basehaz(model, centered = FALSE)` returns $\hat{\Lambda}_0(t)$, and the baseline survival is simply $\hat{S}_0(t) = \exp[-\hat{\Lambda}_0(t)]$.
+
+**Important**: the option `centered = FALSE` is essential. If `centered = TRUE` (the default), `basehaz()` returns the cumulative hazard centered at the mean covariate values, not the true baseline.
+
+### Computing the survival for a specific patient
+
+Once we have $\hat{S}_0(t)$ and $\hat{\boldsymbol{\beta}}$, the survival for any patient profile is obtained by plugging in their covariate values:
+
+$$\hat{S}(t;\mathbf{x}^*) = \left[\hat{S}_0(t)\right]^{\exp(\hat{\boldsymbol{\beta}}'\mathbf{x}^*)}$$
+
+For our target patient (CP, FIGO III, Karnofsky 80, tumour 3 cm, histotype 3), the covariates are:
+
+| Variable | Original value | Recoded value | Meaning |
+|---|---|---|---|
+| `treat` | 2 (CP) | $x_{\text{CP}} = 1$, $x_{\text{P}} = 0$ | Dummy for CP |
+| `figo` | 3 (stage III) | $x_{\text{FIGO\,III}} = 1$ | Dummy for FIGO III |
+| `kar` | 80 | `karc` $= 1$ (since $80 > 70$) | Good performance |
+| `tures` | 3 cm | `turesc` $= 1$ (since 2--10 cm) | Medium tumour |
+| `histo` | 3 | `histoc` $= 1$ (since $3 \in [2,6]$) | Non-serous |
+
+The linear predictor for this patient is:
+
+$$\hat{\boldsymbol{\beta}}'\mathbf{x}^* = \hat{\beta}_{\text{CP}} + \hat{\beta}_{\text{FIGO\,III}} + \hat{\beta}_{\text{karc}} + \hat{\beta}_{\text{turesc\,med}} + \hat{\beta}_{\text{histoc}}$$
+### Method 1: manual computation
+
+```{r question6-manual}
+# Re-fit the adjusted Cox model
+model6 <- coxph(Surv(survtime, surv) ~ factor(treat) + factor(figo) +
+                  factor(karc) + factor(turesc) + factor(histoc), data = ova)
+
+# Estimate the baseline cumulative hazard (Breslow estimator) 
+bas <- basehaz(model6, centered = FALSE)
+head(bas)
+
+# Baseline survival: S_0(t) = exp(-Lambda_0(t)) 
+bas.surv <- exp(-bas$hazard)
+
+plot(bas$time, bas.surv,
+     type = 's', col = 1, lty = 2, lwd = 1,
+     ylim = c(0, 1), xlim = c(0, 13),
+     xlab = 'Time (years)', ylab = 'Survival probability',
+     main = 'Baseline and patient-specific survival curves')
+
+coef(model6)
+
+# Linear predictor: beta_CP + beta_FIGOIII + beta_karc1 + beta_turesc1 + beta_histoc1
+lp_CP <- coef(model6)["factor(treat)2"] +
+         coef(model6)["factor(figo)3"] +
+         coef(model6)["factor(karc)1"] +
+         coef(model6)["factor(turesc)1"] +
+         coef(model6)["factor(histoc)1"]
+
+surv_patientCP <- bas.surv^(exp(lp_CP))
+
+surv_patientCP <- bas.surv^(exp(lp_CP))
+
+lines(bas$time, surv_patientCP, type = 's', lwd = 2, col = 2)
+legend("topright",
+       legend = c("Baseline (all ref. categories)", "CP patient"),
+       col = c(1, 2), lwd = c(1, 2), lty = c(2, 1), bty = "n")
+```
+
+### Method 2: Using `survfit()` with `newdata`
+
+```{r question6-survfit}
+fit_CP <- survfit(model6,
+                  newdata = data.frame(treat = 2, figo = 3,
+                                       karc = 1, turesc = 1, histoc = 1))
+
+plot(bas$time, bas.surv,
+     type = 's', col = 1, lty = 2, lwd = 1,
+     ylim = c(0, 1), xlim = c(0, 13),
+     xlab = 'Time (years)', ylab = 'Survival probability',
+     main = 'Baseline and CP patient survival (survfit method)')
+
+lines(fit_CP$time, fit_CP$surv, type = 's', lwd = 2, col = 2)
+legend("topright",
+       legend = c("Baseline", "CP patient (survfit)"),
+       col = c(1, 2), lwd = c(1, 2), lty = c(2, 1), bty = "n")
+```
+
+The first step in calculating a patient-specific survival curve is extracting the baseline hazard, as shown in the provided data table (displaying the cumulative `hazard` at specific `time` points). 
+
+Based on the generated plots:
+
+1. **The Baseline Survival Curve** ($S_0(t)$, dashed black line): This represents a hypothetical patient with all covariates at their reference levels (e.g., treatment = CAP, FIGO = I, Karnofsky $\leq 70$, residual tumour $\leq 2$ cm, serous histotype). Because this reference profile lacks the major risk factors identified in the model, it represents a relatively "good prognosis" scenario. As seen in the plot, the baseline curve remains the highest, dropping to roughly 0.3-0.4 by year 12.
+
+2. **The CP Patient Curve** (solid red line): This curve lies substantially below the baseline, indicating a much worse prognosis. This downward shift occurs because the patient possesses several risk-increasing characteristics (e.g., FIGO stage III with $\hat{\beta} > 0$, medium tumour size with $\hat{\beta} > 0$, and non-serous histotype with $\hat{\beta} > 0$). Even if this patient has a protective factor like Karnofsky $> 70$ ($\hat{\beta} < 0$), the net linear predictor ($\hat{\boldsymbol{\beta}}'\mathbf{x}^*$) is positive. A positive linear predictor translates to a hazard ratio $> 1$ compared to baseline, which exponentially pulls the survival curve downward.
+
+**Methodological validation:** Comparing the two plots demonstrates that calculating the curve manually—using the baseline hazard table and the formula $S(t|\mathbf{x}) = [S_0(t)]^{\exp(\boldsymbol{\beta}'\mathbf{x})}$—and using R's built-in `survfit` function with a `newdata` argument produce **visually identical** results. This confirms the correctness of the computation and illustrates the fundamental proportional hazards relationship linking the Cox model parameters to individual survival predictions.
+
+\newpage
+
+# Question 7: Comparing survival curves across treatments for the same patient profile
+
+*Compare the survival curve in 6 with the survival curves of two patients with the same characteristics, but treated with P and CAP, respectively.*
+
+## Theoretical background
+
+The Cox PH model allows us to **predict** the survival function for any combination of covariate values. Since the model assumes a **multiplicative** covariate effect on the hazard, changing one covariate (e.g.\ treatment) while keeping all others fixed simply changes the exponent applied to the baseline survival:
+
+$$\hat{S}(t;\mathbf{x}^*) = \left[\hat{S}_0(t)\right]^{\exp(\hat{\boldsymbol{\beta}}'\mathbf{x}^*)}$$
+
+For three patients who differ **only** in treatment (CAP, CP, P) but share the same prognostic profile (FIGO III, karc = 1, turesc = 1, histoc = 1), the linear predictors are:
+
+$$LP_{\text{CAP}} = \underbrace{0}_{\text{treat (ref)}} + \hat{\beta}_{\text{FIGO\,III}} + \hat{\beta}_{\text{karc}} + \hat{\beta}_{\text{turesc\,med}} + \hat{\beta}_{\text{histoc}}$$
+
+$$LP_{\text{CP}} = \hat{\beta}_{\text{CP}} + \hat{\beta}_{\text{FIGO\,III}} + \hat{\beta}_{\text{karc}} + \hat{\beta}_{\text{turesc\,med}} + \hat{\beta}_{\text{histoc}}$$
+
+$$LP_{\text{P}} = \hat{\beta}_{\text{P}} + \hat{\beta}_{\text{FIGO\,III}} + \hat{\beta}_{\text{karc}} + \hat{\beta}_{\text{turesc\,med}} + \hat{\beta}_{\text{histoc}}$$
+
+Note that $LP_{\text{CAP}}$ does **not** include a treatment coefficient because CAP (`treat = 1`) is the reference category. The difference between any two linear predictors equals the log-HR for the corresponding treatment comparison:
+
+$$LP_{\text{P}} - LP_{\text{CAP}} = \hat{\beta}_{\text{P}} \quad \Longrightarrow \quad HR(\text{P vs CAP}) = \exp(\hat{\beta}_{\text{P}})$$
+
+This is the key consequence of the PH assumption: the **vertical distance** between the survival curves on a $\log[-\log S(t)]$ scale is constant across time, governed solely by the treatment coefficients.
+
+```{r question7-comparison, fig.cap="Survival curves for three patients differing only in treatment"}
+model6 <- coxph(Surv(survtime, surv) ~ factor(treat) + factor(figo) +
+                  factor(karc) + factor(turesc) + factor(histoc), data = ova)
+
+bas <- basehaz(model6, centered = FALSE)
+bas.surv <- exp(-bas$hazard)
+
+fit_CAP <- survfit(model6,
+                   newdata = data.frame(treat = 1, figo = 3,
+                                        karc = 1, turesc = 1, histoc = 1))
+fit_CP <- survfit(model6,
+                  newdata = data.frame(treat = 2, figo = 3,
+                                       karc = 1, turesc = 1, histoc = 1))
+fit_P <- survfit(model6,
+                 newdata = data.frame(treat = 3, figo = 3,
+                                      karc = 1, turesc = 1, histoc = 1))
+
+plot(bas$time, bas.surv,
+     type = 's', col = "gray50", lty = 2, lwd = 1,
+     ylim = c(0, 1), xlim = c(0, 13),
+     xlab = 'Time (years)', ylab = 'Survival probability',
+     main = 'Predicted survival by treatment (same patient profile)')
+
+lines(fit_CAP$time, fit_CAP$surv, type = 's', lwd = 2, col = 1)
+lines(fit_CP$time, fit_CP$surv, type = 's', lwd = 2, col = 2)
+lines(fit_P$time, fit_P$surv, type = 's', lwd = 2, col = 3)
+
+legend("topright",
+       legend = c("Baseline (all ref.)", "CAP", "CP", "P"),
+       col = c("gray50", 1, 2, 3),
+       lwd = c(1, 2, 2, 2),
+       lty = c(2, 1, 1, 1),
+       bty = "n")
+```
+
+The plot displays four survival curves to illustrate the adjusted effect of the three treatments on a specific, high-risk patient profile:
+
+* **Baseline (all ref.)** (dashed gray line): The hypothetical patient with all covariates at their reference categories (e.g., CAP treatment, FIGO I, Karnofsky $\leq 70$, residual tumour $\leq 2$ cm, serous histotype). This represents a "best prognosis" profile, resulting in the highest survival curve.
+* **CAP** (solid black line): The target high-risk patient profile (e.g., FIGO III, medium tumour size, non-serous histotype) treated with the CAP polychemotherapy regimen. Because of the risk factors, this patient has a noticeably worse prognosis than the baseline, shifting the curve downward.
+* **CP** (solid red line): The *exact same* high-risk patient profile, but treated with the two-drug combination (CP). The curve lies slightly below the CAP curve, visually reflecting that the hazard ratio $HR(\text{CP vs CAP}) = \exp(\hat{\beta}_{\text{CP}})$ is greater than 1.
+* **P** (solid green line): The *exact same* high-risk patient profile, treated with cisplatin monotherapy (P). This curve is the lowest among the treatment arms, reflecting that $HR(\text{P vs CAP}) = \exp(\hat{\beta}_{\text{P}})$ is the largest, indicating the highest hazard of death.
+
+#### Key takeaways:
+
+1.  **Consistent ordering:** The ordering of the survival curves (CAP > CP > P) is consistent across all time points. This non-crossing behavior is a direct visual consequence of the **proportional hazards assumption**. Under a PH model, the hazard ratios between groups are assumed constant over time, meaning the relative ordering of survival probabilities is fixed.
+2.  **Clinical interpretation:** This comparison isolates and illustrates the adjusted treatment effect. By fixing the patient profile (FIGO stage, performance status, tumour size, and histotype) and varying only the treatment, the model demonstrates that polychemotherapy including adriamycin (CAP) provides the best overall survival trajectory, while cisplatin monotherapy (P) is associated with the worst prognosis for this specific clinical presentation.
+
+\newpage
+
+# Question 8: Checking the PH assumption via Schoenfeld residuals
+
+*Fit the model of point 5 and check the PH assumption for karc and for histoc by the Schoenfeld residuals plot.*
+
+### Why check proportional hazards?
+
+The Cox model assumes that the hazard ratio between any two covariate patterns is **constant over time**. If this assumption is violated for a covariate $x_k$, the estimated $\hat{\beta}_k$ represents a kind of "average" effect over time, which may be misleading. The course presents several approaches to check PH; here we use **Schoenfeld residuals**.
+
+### Schoenfeld residuals
+
+In the Cox model, the contribution to the **score statistic** at event time $t_{(j)}$ is:
+
+$$U_k(\boldsymbol{\beta}) = x_{k(j)} - \frac{\sum_{i \in R(t_{(j)})} x_{ki} \cdot \exp(\hat{\boldsymbol{\beta}}'\mathbf{x}_i)}{\sum_{i \in R(t_{(j)})} \exp(\hat{\boldsymbol{\beta}}'\mathbf{x}_i)}$$
+
+This is the difference between the observed covariate value $x_{k(j)}$ (for the individual who fails at $t_{(j)}$) and the **weighted average** of $x_k$ over the risk set $R(t_{(j)})$. The Schoenfeld residual for covariate $x_k$ at time $t_{(j)}$ is:
+
+$$r_{kj} = x_{k(j)} - \hat{E}(x_k \mid R(t_{(j)}))$$
+
+Key properties:
+
+- These residuals pertain to **event times** $t_{(j)}$, not to individual subjects.
+- Under the PH assumption: $E(r_{kj}) \approx 0$ for all $j$.
+- The **scaled** version (used by `cox.zph`) includes a variance component and can be interpreted as a time-varying estimate of $\beta_k(t)$.
+
+### Graphical diagnostic
+
+The function `cox.zph()` computes a **smoothed curve** $\hat{\beta}_k(t)$ from the scaled Schoenfeld residuals plotted against time. Under PH:
+
+- The smoothed curve should be **approximately horizontal** (i.e.\ $\beta_k$ does not change with time).
+- The red dashed line at $y = 0$ represents no effect; the horizontal reference for the "average" $\hat{\beta}_k$ is the model estimate.
+
+If the curve shows a **clear trend** (increasing, decreasing, or non-monotone), this suggests that the effect of $x_k$ changes over time and the PH assumption may be violated.
+
+`cox.zph()` also provides a formal **test** for each covariate, based on the correlation between the scaled Schoenfeld residuals and a function of time (by default, the Kaplan-Meier transform). A significant p-value indicates evidence against PH.
+
+```{r question8-schoenfeld, fig.height=5, fig.width=10}
+model5 <- coxph(Surv(survtime, surv) ~ factor(treat) + factor(figo) +
+                  factor(karc) + factor(turesc) + factor(histoc), data = ova)
+
+# Compute Schoenfeld residuals test for all covariates
+ph_test <- cox.zph(model5)
+print(ph_test)
+
+par(mfrow = c(1, 2), mar = c(4, 4, 3, 2))
+
+checkPH.kar <- cox.zph(model5)[3]
+plot(checkPH.kar, main = "Check PH assumption of karc")
+points(checkPH.kar$x, checkPH.kar$y, pch = 16, col = "lightgray")
+abline(h = 0, lty = 2, col = 2)
+
+checkPH.hist <- cox.zph(model5)[5]
+plot(checkPH.hist, main = "Check PH assumption of histoc")
+points(checkPH.hist$x, checkPH.hist$y, pch = 16, col = "lightgray")
+abline(h = 0, lty = 2, col = 2)
+```
+
+An alternative visualisation is available via the `survminer` package:
+
+```{r question8-ggcoxzph, fig.height=8, fig.width=10}
+library(survminer)
+ggcoxzph(cox.zph(model5))
+```
+
+The `cox.zph()` function tests the proportional hazards assumption for a Cox regression model fit. It performs a test for each covariate and a global test for the model as a whole.
+
+#### Reading the `cox.zph` output
+The printed table reports the test statistic (`chisq`) and the corresponding p-value (`p`) for the null hypothesis $H_0$: the PH assumption holds (i.e., the coefficient $\beta_k$ is constant over time). A small p-value indicates evidence **against** the PH assumption.
+
+Based on the provided output:
+
+* **`factor(treat)`**, **`factor(figo)`**, and **`factor(karc)`**: have p-values > 0.05, suggesting no significant violation of the PH assumption for these variables.
+* **`factor(turesc)`** (p = 0.01869) and **`factor(histoc)`** (p = 0.00043): have statistically significant p-values, indicating that their effects change over time and violate the PH assumption.
+* **`GLOBAL`**: The overall test is highly significant (p = 8.8e-05), driven by `turesc` and `histoc`.
+
+#### Reading the Schoenfeld residual plots
+Visualizing the scaled Schoenfeld residuals against time helps diagnose the nature of the non-proportionality. Each plot displays:
+
+* **Points**: the individual scaled Schoenfeld residuals at each event time.
+* **Solid black line**: the smoothed estimate of the time-varying coefficient $\hat{\beta}_k(t)$.
+* **Dashed black lines**: the pointwise 95% confidence band around the smoothed estimate.
+* **Horizontal reference line** (at y = 0 or the overall estimate): reference for a constant effect.
+
+**For `karc` (Karnofsky Index):**
+The individual test yielded a p-value of 0.2222. Correspondingly, the smoothed curve in the plot is approximately **horizontal** and mostly flat. This confirms that the protective effect of a good performance status is **roughly constant** over time, and the PH assumption is reasonable.
+
+**For `histoc` (Histotype):**
+The individual test yielded a highly significant p-value (p = 4e-04). The plot shows a clear **decreasing trend** in the smoothed curve. The effect of a non-serous histotype ($\hat{\beta}_{\text{histoc}}$) appears to **diminish over time**, starting positive (acting as a strong risk factor early on) and moving toward zero (or even negative values) at later times. This visual evidence confirms that the PH assumption is violated. A similar downward trend is visible for `turesc`.
+
+#### Remedies for non-proportional Hazards
+When the PH assumption is violated for certain covariates, the model needs to be adjusted. Possible remedies include:
+
+1.  **Stratification**: Stratifying the baseline hazard on the violating variable (e.g., using `strata(histoc)`), which allows different baseline hazards for each group without estimating a single, constant hazard ratio (Question 10).
+2.  **Time-Dependent Covariates**: Explicitly modeling the time-dependent effect by introducing an interaction term between the covariate and a function of time, such as $t$ or $\log(t)$.
+
+\newpage
+
+# Question 9: Checking PH via the log(-log(Survival)) plot
+
+*Check the PH assumption for karc and for histoc by the log(-log(Survival)) plot.*
+
+## Theoretical background
+
+### The log-log transformation and proportional hazards
+
+This is a **graphical check** that can be performed **before fitting** the Cox model (listed as method 0 in the course). It exploits a direct algebraic consequence of the PH assumption.
+
+Recall that in the PH model, the survival function for a subject with covariates $\mathbf{x}$ is related to the baseline survival by:
+
+$$S(t;\mathbf{x}) = \left[S_0(t)\right]^{\exp(\boldsymbol{\beta}'\mathbf{x})}$$
+
+Taking the logarithm:
+
+$$\log S(t;\mathbf{x}) = \exp(\boldsymbol{\beta}'\mathbf{x}) \cdot \log S_0(t)$$
+
+Since $S(t) \leq 1$, we have $\log S(t) \leq 0$, so $-\log S(t) \geq 0$. Taking the log again:
+
+$$\log\!\left[-\log S(t;\mathbf{x})\right] = \boldsymbol{\beta}'\mathbf{x} + \log\!\left[-\log S_0(t)\right]$$
+
+For two groups defined by a binary covariate $x_k$ (e.g.\ karc $= 0$ vs $= 1$):
+
+$$\log\!\left[-\log S(t; x_k\!=\!1)\right] - \log\!\left[-\log S(t; x_k\!=\!0)\right] = \beta_k$$
+
+This means that under PH, the $\log(-\log S(t))$ curves for the two groups should be **parallel** (i.e.\ separated by a **constant vertical distance** $= \beta_k$) at all time points.
+
+### How to read the plot
+
+- Plot $\log\!\left[-\log \hat{S}_{KM}(t)\right]$ vs.\ $\log(t)$ for each group.
+- If the curves are approximately **parallel** $\Rightarrow$ PH assumption is reasonable.
+- If the curves **cross** or the distance changes systematically over time
+  $\Rightarrow$ evidence against PH.
+
+Note: this is a purely descriptive, nonparametric check (based on KM estimates), with no formal p-value. It complements the Schoenfeld residuals approach, which is based on the fitted Cox model.
+
+```{r question9-cloglog, fig.height=5, fig.width=10}
+par(mfrow = c(1, 2), mar = c(4, 4, 3, 2))
+
+km.karc <- survfit(Surv(survtime, surv) ~ factor(karc), data = ova)
+plot(km.karc,
+     col = c("black", "red"),
+     fun = "cloglog",
+     ylab = "log(-log(Survival))",
+     xlab = "log(time)",
+     main = "Check PH assumption of karc")
+legend("bottomright",
+       legend = c("karc = 0 (kar <= 70)", "karc = 1 (kar > 70)"),
+       col = c("black", "red"), lwd = 1, bty = "n")
+
+km.histoc <- survfit(Surv(survtime, surv) ~ factor(histoc), data = ova)
+plot(km.histoc,
+     col = c("black", "red"),
+     fun = "cloglog",
+     ylab = "log(-log(Survival))",
+     xlab = "log(time)",
+     main = "Check PH assumption of histoc")
+legend("bottomright",
+       legend = c("histoc = 0 (serous)", "histoc = 1 (non-serous)"),
+       col = c("black", "red"), lwd = 1, bty = "n")
+```
+
+The `fun = "cloglog"` option in `plot.survfit` applies the transformation $\log(-\log(\hat{S}_{KM}(t)))$ and plots it against $\log(t)$. Under the proportional hazards (PH) assumption, the curves for different groups should be separated by a constant vertical distance (i.e., they should be parallel).
+
+**For `karc` (Karnofsky Index):**
+As seen in the left plot, the two curves (black for `karc = 0`, red for `karc = 1`) appear roughly **parallel** throughout the follow-up period. The vertical distance between them remains approximately constant. This visual evidence is consistent with the PH assumption holding true for this variable, perfectly aligning with the previous Schoenfeld residuals analysis (where the smoothed effect $\hat{\beta}(t)$ was approximately horizontal).
+
+**For `histoc` (Histotype):**
+As seen in the right plot, the two curves (black for serous, red for non-serous) clearly show a **non-constant vertical distance**. Early in the follow-up, there is a clear separation, but as time progresses (around $\log(t) = 5.00$), the curves converge and touch. This non-parallel behavior indicates that the log-hazard ratio for histotype is not constant over time, visually confirming the significant departure from the PH assumption detected by the `cox.zph` test.
+
+### Comparison of the two diagnostic approaches
+
+| Method | Type | Based on | Output |
+| :--- | :--- | :--- | :--- |
+| **$\log(-\log(S))$ plot** | Nonparametric, pre-fitting | KM estimates per group | Visual: parallel $\Rightarrow$ PH holds |
+| **Schoenfeld residuals** | Model-based, post-fitting | Scaled residuals from Cox fit | Visual + formal test (p-value) |
+
+Both approaches lead to **concordant** conclusions in this analysis. 
+
+* The advantage of the $\log(-\log(S))$ plot is that it is simple and model-free. Its primary limitation is that it is only applicable to **categorical** covariates (since we need to define distinct groups to plot) and it does **not adjust** for the presence of other covariates. 
+* The Schoenfeld residuals, on the other hand, assess the PH assumption for each covariate **in the presence of all other covariates** included in the multivariable model.
+
+The confirmed finding that the PH assumption is violated for `histoc` motivates the use of a **stratified Cox model** or modeling a **time-dependent effect** as necessary methodological remedies.
+
+\newpage
+
+# Question 10: Stratified Cox model on histoc
+
+*Fit the model of point 5 but stratifying on the histoc variable.*
+
+## Theoretical background
+
+### The stratified Cox model
+
+In Question 8-9 we found evidence that the PH assumption may be violated for `histoc`. One solution is the **stratified Cox model**, which allows the baseline hazard to differ across strata defined by the problematic variable, while still assuming a **common** covariate effect ($\boldsymbol{\beta}$) across strata.
+
+For $M$ strata defined by $x_k$ (here `histoc` $\in \{0, 1\}$, so $M = 2$), the model is:
+
+$$\lambda_m(t; \mathbf{x}^-) = \lambda_{0m}(t) \cdot \exp(\boldsymbol{\beta}' \mathbf{x}^-)$$
+
+where:
+
+- $m = 1, \dots, M$ indexes the **stratum** (here $m = 0$ for serous, $m = 1$ for non-serous)
+- $\lambda_{0m}(t)$ is the **stratum-specific baseline hazard**, completely unspecified and
+  allowed to have a **different shape** in each stratum
+- $\mathbf{x}^-$ denotes the **remaining** covariates (all variables except the stratification
+  variable)
+- $\boldsymbol{\beta}$ is shared across all strata — the hazard ratios for the remaining covariates
+  are assumed to be the **same** in every stratum
+
+### Key properties
+
+The stratified Cox model has two important characteristics:
+
+1. **No PH assumption is needed** for the stratification variable ($x_k$), because
+   each stratum has its own unrestricted baseline hazard $\lambda_{0m}(t)$.
+2. The **PH assumption still holds within each stratum** for all other covariates
+   $\mathbf{x}^-$.
+
+The trade-off is that by stratifying on `histoc`, we **no longer estimate** a hazard ratio for histotype — there is no $\beta_{\text{histoc}}$ in the model. The effect of histotype is absorbed into the stratum-specific baselines.
+
+### Partial likelihood for the stratified model
+
+The partial likelihood is the **product** of stratum-specific partial likelihoods:
+
+$$PL(\boldsymbol{\beta}) = \prod_{m=1}^{M} PL_m(\boldsymbol{\beta})$$
+
+Each $PL_m$ is computed using only the subjects and event times within stratum $m$.
+The estimation of $\boldsymbol{\beta}$ proceeds as usual by maximising the log of this combined partial likelihood.
+
+```{r question10-stratified}
+model.strat <- coxph(Surv(survtime, surv) ~ factor(treat) + factor(figo) +
+                       factor(karc) + factor(turesc) + strata(histoc),
+                     data = ova)
+summary(model.strat)
+```
+
+```{r question10-comparison}
+model5 <- coxph(Surv(survtime, surv) ~ factor(treat) + factor(figo) +
+                  factor(karc) + factor(turesc) + factor(histoc), data = ova)
+
+cbind(unstratified = coef(model5)[c("factor(treat)2", "factor(treat)3",
+                                     "factor(figo)2", "factor(figo)3",
+                                     "factor(karc)1", "factor(turesc)1",
+                                     "factor(turesc)2")],
+      stratified   = coef(model.strat))
+```
+
+```{r stratified-cox, echo=FALSE}
+# Insert your R code here for the stratified model and coefficient comparison
+# model_strat <- coxph(formula = Surv(survtime, surv) ~ factor(treat) + factor(figo) + factor(karc) + factor(turesc) + strata(histoc), data = ova)
+# summary(model_strat)
+# cbind(unstratified = coef(model2), stratified = coef(model_strat)) # Example comparison code
+```
+
+Comparing the `summary()` output of this stratified model with the unstratified model (from Question 5) reveals several key differences:
+
+* **No coefficient for `histoc`:** The stratified model output no longer estimates a log-hazard ratio ($\beta$) for `histoc`. Instead, its effect is captured non-parametrically by allowing separate, distinct baseline hazards for the serous and non-serous groups.
+* **Stability of remaining covariates:** The estimated coefficients for the other covariates (treatment, FIGO, Karnofsky index, and tumour size) remain **very similar** to those from the unstratified model. For example, as shown in the comparison table:
+    * The effect of treatment 3 vs 1 (`factor(treat)3`) shifted only slightly from **0.313** to **0.307**.
+    * The effect of medium tumour size (`factor(turesc)1`) shifted from **0.702** to **0.685**.
+    * The protective effect of Karnofsky > 70 (`factor(karc)1`) barely changed, going from **-0.393** to **-0.392**.
+
+Because the estimates did not change substantially, we can conclude that the non-proportional behavior of `histoc` was not severely confounding or distorting the overall estimates of the other variables in the basic model. The partial likelihood is now simply computed independently within each histotype stratum and then summed.
+
+### When to use stratification
+
+Stratification is a highly effective remedy when:
+
+1.  **The PH assumption is violated** for a specific variable (as detected for `histoc` via Schoenfeld residuals and log-log plots).
+2.  **We are not primarily interested** in quantifying the precise hazard ratio of that specific variable (since we explicitly lose the ability to estimate its $\beta$ coefficient).
+3.  **The variable is categorical** with a limited number of levels. Stratifying on a continuous variable or one with too many categories would severely fragment the data, reducing statistical power.
+
+An alternative approach that **retains** an estimate of the histotype effect—while accommodating its non-proportional nature—is the **time-dependent coefficient model**. This will be explored in Question 12 by introducing an interaction term with a function of time, such as $\ln(t) - \ln(3)$.
+
+\newpage
+
+# Question 11: Continuous Karnofsky and linearity assumption
+
+*Fit the model of point 5. but with kar (numerical) instead of karc. Check the linearity assumption using the martingale residuals plot and splines.*
+
+## Theoretical background
+
+### Why check the functional form?
+
+In the Cox model, when a covariate $x_k$ is included as **continuous** (numerical), the model assumes a **log-linear** relationship between $x_k$ and the log-hazard:
+
+$$\log \lambda(t; x_k) = \log \lambda_0(t) + \beta_k \, x_k$$
+
+This means that a one-unit increase in $x_k$ always produces the **same** additive change $\beta_k$ in the log-hazard, regardless of the starting value. For example, the model assumes that going from Karnofsky 40 to 50 has the same effect on the log-hazard as going from 80 to 90.
+
+This assumption may be unrealistic. Two tools are available to check it: **martingale residuals** and **splines**.
+
+### Martingale residuals
+
+For each subject $i$ with covariate vector $\mathbf{x}_i$, the martingale residual is:
+
+$$r_i = \delta_i - \hat{\Lambda}_0(t_i)\exp(\hat{\boldsymbol{\beta}}'\mathbf{x}_i)$$
+
+This has the structure **Observed $-$ Expected**: $\delta_i$ is the event indicator (0 or 1) and $\hat{\Lambda}_0(t_i)\exp(\hat{\boldsymbol{\beta}}'\mathbf{x}_i)$ is the estimated cumulative hazard for subject $i$ up to their observed time, i.e.\ the expected number of events.
+
+Key properties:
+
+- Unlike Schoenfeld residuals (which pertain to **event times**), martingale residuals pertain to **individual subjects** (covariate values).
+- Under a correct functional form: $E(r_i) \approx 0$ for all values of $x_k$.
+- Range: $(-\infty, 1]$ — censored subjects have $r_i \leq 0$, events have $r_i \leq 1$.
+
+### Graphical diagnostic
+
+Plot the martingale residuals $r_i$ against the continuous covariate $x_k$ and superimpose a **LOWESS** (locally weighted scatterplot smoother) curve:
+
+- If the LOWESS curve is approximately **linear** (or flat around 0) $\Rightarrow$ the linearity assumption is reasonable.
+- If the LOWESS shows a **non-linear pattern** (e.g.\ a curve, a step, a threshold) $\Rightarrow$ the functional form may need to be modified (e.g.\ using a transformation, a categorisation, or a spline).
+
+### Spline approach
+
+An alternative is to fit the Cox model with a **B-spline** (or natural spline) function $g(x_k)$ replacing the linear term $\beta_k x_k$:
+
+$$\lambda(t; x_k) = \lambda_0(t) \cdot \exp\!\left[g(x_k)\right]$$
+
+where $g(x_k) = \sum_{l=1}^{L} \gamma_l \, B_l(x_k)$ is a flexible piecewise polynomial.
+The resulting **hazard ratio** as a function of $x_k$ (relative to a reference value) can be plotted to reveal the true shape of the covariate effect — if the curve is approximately a straight line on the log-HR scale, linearity is supported.
+
+### Model with continuous Karnofsky
+
+```{r question11-model}
+model11 <- coxph(Surv(survtime, surv) ~ factor(treat) + factor(figo) +
+                   kar + factor(turesc) + factor(histoc), data = ova)
+summary(model11)
+```
+
+### Martingale residuals plot
+
+```{r question11-martingale, fig.height=5, fig.width=6}
+mar.res <- resid(model11, type = 'martingale')
+
+plot(ova$kar, mar.res,
+     xlab = "Karnofsky Index",
+     ylab = "Martingale Residuals",
+     main = "Check functional form of kar",
+     pch = 1, col = "gray40")
+lines(lowess(ova$kar, mar.res), col = 'red', lwd = 2)
+abline(h = 0, lty = 2)
+```
+
+### Spline-based hazard ratio plot
+
+```{r question11-spline, fig.height=5, fig.width=6}
+library(splines)
+library(Greg)
+
+model.kar.bs <- coxph(Surv(survtime, surv > 0) ~ bs(kar, 4), data = ova)
+
+par(mar = c(4, 4, 2, 1))
+plotHR(model.kar.bs,
+       term = "kar",
+       plot.bty = "o",
+       ylog = TRUE,
+       xlim = c(30, 100),
+       rug = "density",
+       xlab = "Karnofsky Index",
+       polygon_ci = TRUE)
+```
+
+In this model, the Karnofsky index is included as a continuous variable (`kar`) rather than a binary factor (`karc`). 
+
+From the `summary()` output, the coefficient for `kar` is highly significant: $\hat{\beta}_{\text{kar}} = -0.0168$ ($p = 5.72e-06$). The interpretation of this coefficient is:
+$$HR(\text{kar} + 1 \text{ vs kar}) = \exp(\hat{\beta}_{\text{kar}}) = 0.983$$
+Since a higher Karnofsky score indicates a better performance status, we observe a protective effect: each one-unit increase in the Karnofsky index is associated with a roughly 1.7% decrease in the hazard of death.
+
+However, including a continuous variable in a Cox model assumes that its relationship with the log-hazard is **linear**. We must verify this assumption.
+
+### 1. Martingale Residuals Plot
+The first plot shows the Martingale residuals against the continuous `kar` variable. The overlaid red LOWESS (locally weighted scatterplot smoothing) curve helps visualize the trend. The curve appears approximately **linear** (slightly decreasing from left to right), without severe non-linear deviations or U-shapes. This suggests that the assumption of a log-linear effect for the Karnofsky index is generally **reasonable**.
+
+### 2. Spline Plot (Hazard Ratio)
+The second plot shows a more flexible estimation using splines, displaying the Hazard Ratio (on a logarithmic scale) as a function of the Karnofsky Index. 
+* **Trend:** The solid blue line shows a clear, consistent downward trend as the Karnofsky score increases. Because the y-axis (Hazard Ratio) is typically plotted on a log scale in these diagnostic plots, a straight line indicates a linear relationship with the log-hazard. The observed curve is largely straight, supporting the linear assumption.
+* **Confidence Intervals:** The shaded blue region represents the confidence band. It is wider at the lower extremes (scores 30-50) where data is sparse, and narrower at the higher end (80-100) where most patients are concentrated (as indicated by the density "rug" at the bottom of the plot).
+* **Conclusion:** There are no obvious threshold effects (e.g., flat then sudden drop) or non-monotone behaviors. Therefore, a simple linear term `kar` is adequate.
+
+### Comparison: Binary `karc` vs Continuous `kar`
+
+| Approach | Pros | Cons |
+| :--- | :--- | :--- |
+| **`karc`** (binary, $\leq 70$ vs $> 70$) | Simple interpretation; does not assume linearity. | Loses information; choice of the 70 cutpoint can be arbitrary. |
+| **`kar`** (continuous, linear) | Uses all available data; parsimonious (only 1 parameter). | Assumes a log-linear relationship (which we verified is reasonable here). |
+| **Spline** e.g., `bs(kar)` | Highly flexible; data-driven shape without linearity assumptions. | Uses more degrees of freedom; harder to interpret a single HR. |
+
+Based on these diagnostics, using the continuous `kar` variable with a linear effect is a statistically sound and efficient modelling choice for this dataset.
+
+\newpage
+
+# Question 12: Cox model with time-dependent effect for histoc
+
+*Fit the model of point 11 but with a time-dependent effect for histoc: include an interaction term with the function of time $g(t)=\ln(t)-\ln(3)$.*
+
+## Theoretical background
+
+### Extension of the Cox model: time-varying coefficients
+
+In Questions 8--9 we found evidence that the PH assumption is violated for `histoc`.
+In Question 10 we addressed this via stratification, but that approach does not provide an estimate of the histotype effect. An alternative is to model the **time-dependent effect** explicitly.
+
+The extended Cox model with a time-varying coefficient for $x_k$ is:
+
+$$\lambda(t; \mathbf{x}) = \lambda_0(t) \cdot \exp\!\left(\boldsymbol{\beta}'\mathbf{x}^- + \beta_k \, x_k + \gamma_k \, x_k \cdot g(t)\right)$$
+
+where $g(t)$ is an arbitrary, pre-specified function of time. The **time-dependent hazard ratio** for $x_k = 1$ vs $x_k = 0$ (holding $\mathbf{x}^-$ fixed) becomes:
+
+$$HR(t;\, x_k\!=\!1 \text{ vs } x_k\!=\!0) = \exp\!\left[\beta_k + \gamma_k \cdot g(t)\right]$$
+
+This is no longer constant — it changes over time through $g(t)$.
+
+### Choice of $g(t) = \ln(t) - \ln(3)$
+
+As presented in the course, we choose:
+
+$$g(t) = \ln(t) - \ln(3) = \ln\!\left(\frac{t}{3}\right)$$
+
+where 3 (years) is approximately the mean overall survival time. This centering ensures that at $t = 3$ years, $g(3) = 0$, so the HR at $t = 3$ equals $\exp(\beta_k)$, which is directly interpretable.
+
+The time-dependent HR for histoc is then:
+
+$$HR(t) = \exp\!\left[\hat{\beta}_{\text{histoc}} + \hat{\gamma}_{\text{histoc}} \cdot \left(\ln t - \ln 3\right)\right]$$
+
+### Testing for time-dependence
+
+The coefficient $\gamma_k$ captures the departure from PH:
+
+- $H_0: \gamma_k = 0$ $\Rightarrow$ the PH model is adequate (the effect is constant)
+- $H_1: \gamma_k \neq 0$ $\Rightarrow$ the effect of $x_k$ changes over time
+
+This can be tested via the Wald test on $\hat{\gamma}_k$ or by a Likelihood Ratio Test comparing the model with and without the interaction term.
+
+### Data preparation: time-splitting
+
+To fit a model with a time-dependent covariate in the `survival` package, we need to **split** each subject's follow-up into multiple intervals using `survSplit()`.
+This creates a "counting process" dataset where each row represents an interval $(t_{\text{entry}},\, t_{\text{exit}}]$ for a given subject. Within each interval, the time-dependent covariate $\text{td1} = \text{histoc} \times g(t_{\text{exit}})$ can be computed as a fixed value.
+
+The `Surv(entry, survtime, surv)` syntax (with two time arguments) tells R that the data is in **counting process** (start, stop) format with possible late entry.
+
+### Data splitting
+```{r question12-split}
+cut.points <- unique(ova$survtime[ova$surv == 1])
+
+ova$entry <- 0
+
+ova2 <- survSplit(data = ova, cut = cut.points,
+                  end = "survtime", start = "entry", event = "surv")
+
+ova3 <- ova2[order(ova2$npaz), ]
+
+ova3$td1 <- ifelse(ova3$histoc == 1, log(ova3$survtime / 3), 0)
+
+head(ova3[ova3$npaz == ova3$npaz[1], 
+          c("npaz", "entry", "survtime", "surv", "histoc", "td1")], 10)
+```
+
+### Fit the time-dependent model
+```{r question12-model}
+modeltd <- coxph(Surv(entry, survtime, surv) ~ factor(treat) + factor(figo) +
+                   kar + factor(turesc) + factor(histoc) + td1, data = ova3)
+summary(modeltd)
+```
+
+### Plot the time-dependent HR
+```{r question12-hrplot, fig.height=5, fig.width=7}
+coefftd <- coef(modeltd)
+
+t_seq <- seq(0.01, 12, 0.01)
+HRtd <- exp(coefftd["factor(histoc)1"] + coefftd["td1"] * log(t_seq / 3))
+
+par(mfrow = c(1, 1), mar = c(4, 4, 3, 2))
+plot(t_seq, HRtd,
+     type = 'l', lwd = 2,
+     xlab = "Time (years)", ylab = "HR(t)",
+     main = "Time-dependent HR: non-serous vs serous histotype")
+abline(h = 1, lty = 2, col = "red")
+abline(v = 3, lty = 3, col = "gray50")
+text(3.2, max(HRtd) * 0.9, "t = 3 years\n(centering point)", 
+     adj = 0, cex = 0.8, col = "gray50")
+```
+
+The `summary(modeltd)` output includes two coefficients specifically related to the histotype effect, modeling its time-dependent nature:
+* $\hat{\beta}_{\text{histoc}} = -0.027$: the "fixed" part of the histotype effect. This represents the log-HR exactly at the centering time $t = 3$ years (where the time function $g(3) = 0$). Note that this effect is not statistically significant ($p = 0.8379$), meaning that at exactly 3 years, the risk between histotypes is not significantly different.
+* $\hat{\gamma}_{\text{td1}} = -0.332$: the time-dependent part. This quantifies how the log-HR changes per unit increase in $g(t) = \ln(t/3)$. 
+
+The **Wald test** on $\hat{\gamma}_{\text{td1}}$ formally tests $H_0: \gamma = 0$ (i.e., whether the Proportional Hazards assumption holds for `histoc`). The highly significant p-value ($p = 0.0020$) confirms that the histotype effect is **not constant** over time, strongly rejecting the PH assumption for this covariate.
+
+### HR plot
+Based on the estimated coefficients, the time-dependent hazard ratio is formulated as:
+$$HR(t) = \exp\!\left[-0.027 - 0.332 \cdot \ln\!\left(\frac{t}{3}\right)\right]$$
+
+The plotted curve visually confirms this dynamic behaviour:
+* **Early times** ($t < 3$ years): The term $\ln(t/3)$ is negative. Combined with $\hat{\gamma}_{\text{td1}} < 0$, the overall exponent becomes positive and large. As seen in the plot, the HR is heavily **amplified** right after entry (reaching values above 6), meaning the non-serous histotype is associated with a much higher hazard in the early follow-up period.
+* **At $t = 3$ years**: $HR(3) = \exp(-0.027) \approx 0.973$. This is the "central" estimate. The plot perfectly reflects this, showing the curve crossing the vertical dotted line just slightly below the red reference line of $HR = 1$.
+* **Late times** ($t > 3$ years): The term $\ln(t/3)$ becomes positive. Multiplied by the negative $\hat{\gamma}_{\text{td1}}$, the HR **decreases** further below 1. The curve clearly crosses the red horizontal line and remains below it, suggesting that the direction of the histotype effect actually reverses over time, indicating a lower relative risk for the non-serous group at later stages.
+
+This behaviour is entirely consistent with an analysis of Schoenfeld residuals, where a smoothed $\hat{\beta}(t)$ for `histoc` would show a strongly decreasing trend over time.
+
+### Comparison of approaches for non-PH covariates
+
+| Approach | Estimates $\beta_{\text{histoc}}$? | Allows time-varying effect? | Complexity |
+| :--- | :--- | :--- | :--- |
+| **Basic Cox** | Yes (constant) | No — assumes PH | Simplest |
+| **Stratified Cox** | No (absorbed in baseline) | Yes (via separate $\lambda_{0m}(t)$) | Moderate |
+| **Time-dependent effect** | Yes (time-varying) | Yes (parametric form $g(t)$) | Most complex |
+
+The time-dependent effect model (extended Cox model) is the most informative approach here: it retains an interpretable, albeit time-varying, estimate of the histotype effect ($HR(t)$) and provides a formal statistical test for the departure from proportional hazards against an explicitly **specified alternative** ($g(t) = \ln(t/3)$).
+
+\newpage
+
+# Concluding Remarks: A Didactic Summary of Survival Analysis and the Cox Model
+
+## The Big Picture
+
+This lab walked through the complete workflow of a survival analysis in a clinical trial setting, from descriptive nonparametric estimation to semiparametric regression modelling and diagnostic checking. The dataset — 476 women with advanced ovarian cancer randomised to three treatment regimens — provided the perfect context to apply every major concept covered in the course. Let us retrace the logical thread that connects all 12 questions.
+
+## From Descriptive to Inferential: Questions 1–3
+
+The starting point of any survival analysis is the **Kaplan-Meier estimator**, the nonparametric tool that estimates the survival function without assuming any distributional form. The KM estimator is built on a simple but powerful idea: to survive past time $t$, a patient must survive each of the preceding event times. Formally:
+
+$$\hat{S}_{KM}(t) = \prod_{j:\,t_{(j)} \leq t} \left(1 - \frac{d_j}{n_j}\right)$$
+
+The beauty of this estimator is that it correctly handles **right censoring** — the defining feature of survival data. Each censored patient contributes to the risk set up until their censoring time, and then silently exits. The fundamental assumption is that censoring is **independent** of the failure process: a censored patient is not "special" in terms of prognosis.
+
+Once we have KM curves for each treatment group, the natural question is: are these curves significantly different? Comparing survival at a single arbitrary time point would be inefficient and misleading (the tails of KM curves are unstable, as stressed in the course). Instead, we use **rank-based tests** that pool information across all event times. The key insight is that at each event time $t_{(j)}$, we can construct a $2 \times 2$ table and ask: given the marginal totals (number at risk, number of deaths), is the distribution of deaths across groups consistent with the null hypothesis of equal hazards?
+
+The **Log-Rank test** ($w_j = 1$) gives equal weight to all event times and is most powerful under the **proportional hazards** alternative — the same assumption underlying the Cox model. The **Wilcoxon test** ($w_j = n_j$) gives more weight to early times when the risk set is large. In this dataset, the log-rank was significant ($p = 0.04$) while the Wilcoxon was not ($p = 0.12$), suggesting that treatment differences are not concentrated early but are consistent across time — a hint that proportional hazards may be a reasonable framework.
+
+The **stratified log-rank test** (Question 3) extends this idea by computing the test statistic within strata defined by a prognostic factor and then pooling. This is the nonparametric analogue of "adjusting for confounders" — but it can only handle one factor at a time and does not quantify the treatment effect. This limitation motivates the move to regression.
+
+## The Cox Model: Questions 4–7
+
+The **Cox proportional hazards model** is the workhorse of survival analysis. Its elegance lies in its semiparametric nature:
+
+$$\lambda(t; \mathbf{x}) = \lambda_0(t) \cdot \exp(\boldsymbol{\beta}'\mathbf{x})$$
+
+The baseline hazard $\lambda_0(t)$ is left completely unspecified (nonparametric), while the covariate effects enter parametrically through the exponential function. This separation is made possible by the **partial likelihood**, which depends only on $\boldsymbol{\beta}$ and not on $\lambda_0(t)$. The partial likelihood is constructed by asking, at each event time: given that one death occurred among the subjects at risk, what is the probability that it was the specific individual who actually died? This probability depends only on the relative hazards (i.e., on $\boldsymbol{\beta}$), not on the absolute level of the baseline hazard.
+
+A crucial connection from the course: the **Score test** from a Cox model with a single covariate is asymptotically equivalent to the **Log-Rank test**. This means the Cox model and the log-rank test are not two unrelated methods — they are two perspectives on the same underlying framework. The Cox model simply extends the log-rank idea to handle multiple covariates simultaneously.
+
+**Question 4** (unadjusted model) showed that P has a significantly higher hazard than CAP ($HR = 1.37$, $p = 0.012$). **Question 5** (adjusted model) confirmed that this estimate barely changed after adjusting for FIGO, Karnofsky, tumour size, and histotype. This stability is expected in a **randomised trial**, where prognostic factors should be balanced across treatment arms by design. However, the adjusted model revealed important prognostic information: residual tumour size was the strongest predictor ($HR \approx 3$ for large vs small), Karnofsky $> 70$ was protective ($HR \approx 0.68$), and non-serous histotype was a risk factor ($HR \approx 1.27$). The **Likelihood Ratio Test** comparing the two nested models confirmed that these prognostic factors collectively improve the model.
+
+**Questions 6–7** demonstrated how to translate the Cox model into **individual survival predictions**. The key formula is:
+
+$$S(t; \mathbf{x}) = \left[S_0(t)\right]^{\exp(\boldsymbol{\beta}'\mathbf{x})}$$
+
+This is a direct consequence of the multiplicative hazard structure. The baseline survival $S_0(t)$ is estimated via the **Breslow estimator**, and any individual curve is obtained by raising it to the power $\exp(\hat{\boldsymbol{\beta}}'\mathbf{x})$. This is clinically useful: for a specific patient profile (e.g., CP treatment, FIGO III, good Karnofsky, medium tumour, non-serous), we can predict the entire survival trajectory and compare it across treatment options.
+
+## Model Diagnostics: Questions 8–9
+
+The proportional hazards assumption is the price we pay for the simplicity and interpretability of the Cox model. If PH is violated for a covariate, the estimated $\hat{\beta}$ is a misleading "average" of a time-varying effect. The course presented a toolkit for checking PH, and Questions 8–9 applied two complementary approaches.
+
+**Schoenfeld residuals** (Question 8) are model-based diagnostics. At each event time, the residual for covariate $x_k$ is the difference between the observed value $x_{k(j)}$ and its expected value under the model. Under PH, these residuals should show no trend over time. The `cox.zph()` function smooths them into a time-varying estimate $\hat{\beta}_k(t)$: a horizontal line means PH holds, a trend means it does not. Importantly, this assessment is made **in the presence of all other covariates** in the model — it is a conditional check.
+
+The **log-log plot** (Question 9) is a nonparametric, pre-fitting check. The transformation $\log[-\log S(t)]$ turns the PH property into a simple geometric one: under PH, the curves for different groups should be **parallel**. This method is intuitive and model-free, but it only works for categorical covariates and does not adjust for other variables.
+
+Both methods agreed: PH appeared reasonable for **karc** (approximately horizontal Schoenfeld smooth, parallel log-log curves) but questionable for **histoc** (decreasing Schoenfeld smooth, converging or crossing log-log curves). This finding drove the next two questions.
+
+## Handling Non-Proportional Hazards: Questions 10 and 12
+
+When PH fails for a covariate, the course presented two main remedies within the Cox framework.
+
+**Stratification** (Question 10) allows each stratum to have its own baseline hazard $\lambda_{0m}(t)$, effectively absorbing the non-PH covariate into the background. The partial likelihood becomes the product of stratum-specific likelihoods, and the remaining covariates are still estimated with a common $\boldsymbol{\beta}$. The trade-off is clear: we lose the ability to estimate a hazard ratio for the stratification variable.
+
+**Time-dependent effects** (Question 12) are more informative. By including an interaction between histoc and a function of time $g(t) = \ln(t) - \ln(3)$, we model the HR as:
+
+$$HR(t) = \exp\!\left[\beta_{\text{histoc}} + \gamma \cdot (\ln t - \ln 3)\right]$$
+
+This explicitly parameterises how the effect changes over time. The coefficient $\gamma$ captures the departure from PH: if $\gamma = 0$, we recover the basic PH model; if $\gamma \neq 0$, the effect of histotype varies. The centering at $t = 3$ years (approximately the mean survival) makes $\exp(\beta_{\text{histoc}})$ directly interpretable as the HR at the "average" follow-up time.
+
+The implementation requires **time-splitting** via `survSplit()`, which expands each subject's single row into multiple intervals, creating a counting-process dataset where the time-dependent covariate can be recomputed at each interval boundary. The model is then fitted using the `Surv(entry, survtime, surv)` syntax.
+
+## Checking Functional Form: Question 11
+
+The PH assumption concerns **time**. But there is a second modelling assumption when continuous covariates are involved: **log-linearity**. The Cox model assumes that each unit increase in $x_k$ produces the same additive change in the log-hazard, regardless of the starting value.
+
+**Martingale residuals** are the tool for checking this. For each subject, the martingale residual $r_i = \delta_i - \hat{\Lambda}_0(t_i)\exp(\hat{\boldsymbol{\beta}}'\mathbf{x}_i)$ measures the discrepancy between observed and expected events. Plotting these against the continuous covariate and adding a LOWESS smoother reveals the true functional form: a linear smoother supports the assumption, a curved smoother suggests the need for a transformation or a more flexible model.
+
+**Splines** provide a complementary approach: fit the Cox model with a B-spline basis $g(x_k)$ replacing the linear term and plot the resulting HR as a function of $x_k$. If the spline curve is approximately a straight line on the log scale, linearity is confirmed; otherwise, the shape of the curve suggests the appropriate transformation.
+
+## The Logical Flow
+
+Looking back, the 12 questions form a coherent analytical pipeline:
+
+**Describe** (Q.1) $\rightarrow$ **Test** (Q.2–3) $\rightarrow$ **Model** (Q.4–5) $\rightarrow$ **Predict** (Q.6–7) $\rightarrow$ **Diagnose PH** (Q.8–9) $\rightarrow$ **Fix PH violations** (Q.10, Q.12) $\rightarrow$ **Diagnose linearity** (Q.11)
+
+This is not just an academic exercise — it mirrors the real-world workflow of a biostatistician analysing a clinical trial. Start descriptive, build complexity gradually, always check assumptions, and adapt the model when assumptions fail. The Cox model is not a black box to be applied blindly: it is a flexible framework with known assumptions, and the quality of the analysis depends on how carefully those assumptions are verified and, when necessary, relaxed.
